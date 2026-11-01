@@ -113,6 +113,7 @@ function markLegacy(f, scope = "group:20000") {
       identity: identityAnchors(f.runtime.config, a),
       backendType: "codex",
       toolNames: f.runtime.toolsFor(a, scope),
+      conversation: scope,
     },
   );
   const state = f.memory.state(scope);

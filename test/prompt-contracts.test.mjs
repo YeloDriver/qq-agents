@@ -1,8 +1,132 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { config, fixture, context, FakeTransport } from "./helpers.mjs";
 import { toolSpecs } from "../src/tools/index.mjs";
 import { mcpEntrySpecs, scopedCatalog } from "../src/tools/catalog.mjs";
+import { identityAnchors, stableInstructions } from "../src/core/prompts.mjs";
+
+test("QQ chat style reaches both chat scopes without replacing tool or subject protocols", async (t) => {
+  for (const type of ["codex", "dsh"]) {
+    const cfg = config(1),
+      captured = [];
+    cfg.backends[0].type = type;
+    cfg.agents[0].subject.enabled = true;
+    cfg.agents[0].contextPolicy.capacityTokens = 65536;
+    const { runtime } = fixture(t, {
+      cfg,
+      run: async (p) => captured.push(p),
+    });
+    for (const scope of ["private:30000", "group:20000", "@subject"])
+      await runtime.wake("agent-0", scope);
+    assert.equal(captured.length, 3);
+    for (const p of captured.slice(0, 2)) {
+      assert.match(p.instructions, /简单闲聊不用列表、教程或总结升华/);
+      assert.match(p.instructions, /专业问题、复杂推理或明确要求可以充分展开/);
+      assert.match(p.instructions, /不脑补动机/);
+      assert.match(p.instructions, /保留自然的主谓和必要衔接/);
+      assert.match(p.instructions, /不机械添加助词/);
+      assert.match(p.instructions, /仍可只说“嗯”“晚安”/);
+      assert.match(p.instructions, /疑问和感叹正常使用问号、感叹号/);
+      assert.equal(
+        p.instructions
+          .split("\n")
+          .filter((line) => /^对方.*；过度精简/.test(line)).length,
+        4,
+      );
+      assert.match(
+        p.instructions,
+        /能力和工具是否可用以当前工具目录与实际结果为准/,
+      );
+      assert.match(p.instructions, /普通 assistant 文本不会/);
+      assert.match(p.instructions, /暂停、权限、限额和幂等账本/);
+      assert.deepEqual(
+        p.tools.find((tool) => tool.name === "qq_send"),
+        toolSpecs(["qq_send"])[0],
+      );
+      if (type === "dsh") {
+        assert.match(p.instructions, /bridge_tools/);
+        assert.match(p.instructions, /bridge_call/);
+        assert.match(p.instructions, /发现结果不是授权/);
+      } else assert.match(p.instructions, /参数以 schema 为准/);
+    }
+    const subject = captured[2];
+    assert.doesNotMatch(subject.instructions, /客观自然准则|过度精简正误对照/);
+    assert.match(subject.instructions, /subject_log/);
+    assert(!subject.tools.some((tool) => tool.name === "qq_send"));
+  }
+});
+
+test("QQ style is absent from protected work and other internal instruction scopes", (t) => {
+  const { runtime, store } = fixture(t, { cfg: config(1) });
+  const a = runtime.agent("agent-0"),
+    self = store.bind(a.id).identity.current();
+  for (const scope of [
+    "@subject",
+    "@work",
+    "@work:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "@operations",
+    "privateish:30000",
+    "",
+  ]) {
+    const contract = runtime.contexts.instructionContract(a, scope, self, [
+      "framework_read",
+    ]);
+    assert.doesNotMatch(contract.instructions, /客观自然准则|过度精简正误对照/);
+    assert.match(contract.instructions, /deployment_info、diagnostics_read/);
+    assert.match(contract.instructions, /参数以 schema 为准/);
+  }
+});
+
+test("a chat with the previous style-free instruction digest rebuilds before adopting the new style", async (t) => {
+  const cfg = config(1),
+    captured = [];
+  cfg.agents[0].contextPolicy.capacityTokens = 65536;
+  const { runtime, store } = fixture(t, {
+    cfg,
+    run: async (p) => {
+      captured.push(p);
+      p.saveSession({ id: "style-fixture", backend: "fixture" });
+    },
+  });
+  const scope = "private:30000";
+  await runtime.wake("agent-0", scope);
+  const a = runtime.agent("agent-0"),
+    memory = store.bind(a.id),
+    self = memory.identity.current(),
+    identity = identityAnchors(runtime.config, a);
+  // Omitting the scope recreates the exact pre-style fixed instruction text.
+  const previous = stableInstructions(
+    a,
+    self,
+    false,
+    memory.identity.anchors(a),
+    {
+      backendType: "codex",
+      toolNames: runtime.toolsFor(a, scope),
+      identity: {
+        self: identity.self,
+        administrators: identity.administrators,
+      },
+      dynamicPeers: true,
+    },
+  );
+  assert.doesNotMatch(previous, /客观自然准则/);
+  const previousHash = createHash("sha256").update(previous).digest("hex");
+  memory.setState(scope, {
+    ...memory.state(scope),
+    loadedInstructionsHash: previousHash,
+  });
+  runtime.contexts.upgradeInstructions(a, self);
+  assert.equal(memory.state(scope).loadedInstructionsHash, previousHash);
+  await runtime.wake(a.id, scope);
+  assert.equal(captured[1].session, null);
+  assert.match(captured[1].instructions, /客观自然准则/);
+  assert.equal(memory.identity.current().version, self.version);
+  const history = memory.identity.list("session_history");
+  assert.equal(history.length, 1);
+  assert.equal(history[0].reason, "identity-or-protocol-change");
+});
 
 test("Self and own accounts stay fixed while peer accounts refresh without rebuilding", async (t) => {
   const cfg = config(2),
