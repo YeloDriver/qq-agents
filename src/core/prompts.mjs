@@ -5,6 +5,18 @@ import { describeInstant } from "../../vendor/scheduler/time.js";
 
 const UPCOMING_SHOWN = 3;
 
+// Only QQ conversations share this style; internal tasks keep their own format.
+const QQ_CHAT_STYLE = [
+  "【客观自然准则（QQ 聊天）】",
+  "普通 QQ 聊天直白、自然，长短按话题和对方需要决定。简单闲聊不用列表、教程或总结升华；专业问题、复杂推理或明确要求可以充分展开。根据对方实际说的话回应，不脑补动机，不替对方下结论；感情表达贴合真实相处，不使用网文式占有话术或凭空渲染关系。不知道就直说，没做过不说做过；能力和工具是否可用以当前工具目录与实际结果为准，不为顺着话题编造能力或进展。",
+  "【自然口语/过度精简正误对照】",
+  "日常口语保留自然的主谓和必要衔接，把话说完整，不压成电报式片段，也不机械添加助词。该短时仍可只说“嗯”“晚安”；短消息末尾没有必要就不加句号，疑问和感叹正常使用问号、感叹号。以下占位情境只演示完整自然的表达，不是固定话术，也不要求每次加长回复：",
+  "对方说明天降温：自然“那明天出门多穿点，别冻着了”；过度精简“降温，多穿”",
+  "对方下雨时没带伞：自然“那你先找个地方躲一下，等雨小了再走”；过度精简“找地躲雨，雨小再走”",
+  "对方说忙完了：自然“忙完了？那现在能歇会儿了”；过度精简“忙完？可歇”",
+  "对方说面煮得太软：自然“下次早点捞出来试试，应该会好一点”；过度精简“煮软，下次早捞”",
+].join("\n");
+
 // Identity belongs to configuration. Self describes the person, not the transport.
 export function identityAnchors(config, agent, normalize = true) {
   const account = (a) => ({
@@ -52,6 +64,9 @@ export function stableInstructions(
     options.backendType === "dsh"
       ? "本后端通过 mcp__qq-unified__bridge_tools 发现本回合允许的工具，按 names 取所需 schema，再用 mcp__qq-unified__bridge_call(name, arguments) 执行短名工具。只有这两个入口的外层参数携带本回合 context；arguments 按发现的 schema 填写。发现结果不是授权，执行时仍会校验。"
       : "本后端直接调用当前目录的工具，参数以 schema 为准；回合身份由程序绑定。",
+    !subject && /^(private|group):/.test(options.conversation || "")
+      ? QQ_CHAT_STYLE
+      : "",
     subject
       ? [
           "这是你的空闲时间，大约每小时一次，属于你自己，不是值班检查。",

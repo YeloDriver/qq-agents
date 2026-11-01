@@ -356,7 +356,7 @@ export class ContextLifecycle {
       anchors = r.memory.bind(a.id).identity.anchors(a),
       identity = identityAnchors(r.config, a),
       backendType = r.config.backends.find((b) => b.id === a.backendId)?.type,
-      options = { backendType, toolNames },
+      options = { backendType, toolNames, conversation },
       subject = conversation === SUBJECT,
       hash = (text) => createHash("sha256").update(text).digest("hex");
     const instructions = stableInstructions(a, self, subject, anchors, {
