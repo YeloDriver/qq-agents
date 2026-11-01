@@ -247,7 +247,7 @@ node src/main.mjs --data /path/to/private-data --port 3210
 **参与贡献**
 
 - [贡献指南](CONTRIBUTING.md)
-- [编码助手约定：worktree、PR、CI 与部署](AGENTS.md)
+- [编码助手约定：主线维护、功能分支、CI 与部署](AGENTS.md)
 - [行为准则](CODE_OF_CONDUCT.md)
 
 **历史记录**
