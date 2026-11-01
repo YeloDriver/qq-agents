@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { attachmentName } from "./attachments.mjs";
-import { qqFaceText } from "./qq-faces.mjs";
+import { qqFace, qqFaceText } from "./qq-faces.mjs";
 import { downloadFileStream } from "./file-stream.mjs";
 
 // A half-open TCP connection (NAT timeout, host sleep, a frozen gateway) never
@@ -32,6 +32,36 @@ export function normalizeEvent(raw, connection) {
     raw.notice_type === "group_recall" || raw.notice_type === "friend_recall";
   const fileNotice =
     ["group_upload", "offline_file"].includes(raw.notice_type) && raw.file;
+  const reactionNotice = raw.notice_type === "group_msg_emoji_like";
+  let reaction;
+  if (reactionNotice) {
+    if (
+      raw.post_type !== "notice" ||
+      !isGroup ||
+      typeof raw.is_add !== "boolean" ||
+      !/^\d+$/.test(String(raw.user_id)) ||
+      !/^-?\d+$/.test(String(raw.message_id)) ||
+      !Array.isArray(raw.likes) ||
+      !raw.likes.length
+    )
+      return null;
+    const likes = raw.likes.slice(0, 32).flatMap((/** @type {any} */ like) => {
+      const face = qqFace({ id: like?.emoji_id });
+      return face.id === null
+        ? []
+        : [
+            {
+              faceId: face.id,
+              name: face.name,
+              ...(Number.isSafeInteger(like.count) && like.count >= 0
+                ? { count: like.count }
+                : {}),
+            },
+          ];
+    });
+    if (!likes.length) return null;
+    reaction = { messageId: String(raw.message_id), added: raw.is_add, likes };
+  }
   const message = fileNotice ? [{ type: "file", data: raw.file }] : raw.message;
   if (
     raw.post_type !== "message" &&
@@ -64,6 +94,8 @@ export function normalizeEvent(raw, connection) {
   const poke = raw.notice_type === "notify" && raw.sub_type === "poke";
   const targetId = poke && raw.target_id != null ? String(raw.target_id) : null;
   const join = raw.notice_type === "group_increase";
+  if (reaction)
+    body = `[${reaction.added ? "贴表情" : "取消贴表情"}] QQ:${raw.user_id} → 消息 ${reaction.messageId}：${reaction.likes.map((like) => like.name || `未知表情 ${like.faceId}`).join("、")}`;
   if (poke) body = `[拍一拍] QQ:${raw.user_id} → QQ:${raw.target_id}`;
   if (join) body = `[入群] QQ:${raw.user_id}`;
   if (raw.notice_type === "group_decrease") body = `[离群] QQ:${raw.user_id}`;
@@ -74,21 +106,30 @@ export function normalizeEvent(raw, connection) {
     Number(raw.time) > 0 && Number.isFinite(messageTime.getTime());
   return {
     conversation,
-    messageId: raw.message_id == null ? null : String(raw.message_id),
+    // The notice references an existing message; it is not that message. Keep
+    // its wire ID in reaction so different reactions do not deduplicate together.
+    messageId: reaction
+      ? null
+      : raw.message_id == null
+        ? null
+        : String(raw.message_id),
+    ...(reaction ? { reaction } : {}),
     senderId: String(raw.user_id || raw.sender?.user_id || ""),
     senderName: raw.sender?.card || raw.sender?.nickname || "",
     ...(poke ? { targetId } : {}),
-    kind: fileNotice
-      ? "notice.file"
-      : recall
-        ? "message.recalled"
-        : poke
-          ? "notice.poke"
-          : join
-            ? "notice.join"
-            : raw.post_type === "notice"
-              ? "notice"
-              : "message.received",
+    kind: reaction
+      ? "notice.reaction"
+      : fileNotice
+        ? "notice.file"
+        : recall
+          ? "message.recalled"
+          : poke
+            ? "notice.poke"
+            : join
+              ? "notice.join"
+              : raw.post_type === "notice"
+                ? "notice"
+                : "message.received",
     direction: raw.post_type === "message_sent" ? "out" : "in",
     status: recall ? "recalled" : "observed",
     body,
@@ -141,7 +182,17 @@ export class OneBot extends EventEmitter {
         redirect: "error",
       },
     );
-    if (!response.ok) throw Error("ONEBOT_HTTP_ERROR");
+    if (!response.ok) {
+      if (
+        ["delete_msg", "set_msg_emoji_like"].includes(action) &&
+        response.status === 404
+      ) {
+        const error = Error("ONEBOT_REJECTED");
+        error.reason = "ACTION_UNSUPPORTED";
+        throw error;
+      }
+      throw Error("ONEBOT_HTTP_ERROR");
+    }
     const chunks = [];
     let bytes = 0;
     for await (const chunk of response.body) {
@@ -163,9 +214,23 @@ export class OneBot extends EventEmitter {
       // offline mid-send); the message can still go out afterwards.
       else if (/Timeout: NTEvent/i.test(detail))
         error.reason = "GATEWAY_TIMEOUT";
+      if (
+        ["delete_msg", "set_msg_emoji_like"].includes(action) &&
+        error.reason !== "GATEWAY_TIMEOUT" &&
+        (body.retcode === 1404 ||
+          body.retcode === 404 ||
+          /unsupported|not supported|unknown (?:api|action)|不支持|接口不存在/i.test(
+            detail,
+          ))
+      )
+        error.reason = "ACTION_UNSUPPORTED";
       throw error;
     }
     return body.data;
+  }
+  async recall(messageId) {
+    await this.call("delete_msg", { message_id: String(messageId) });
+    return { confirmed: true };
   }
   async status() {
     const login = await this.call("get_login_info");
@@ -312,6 +377,30 @@ export class OneBot extends EventEmitter {
         this.emit("status");
       });
     });
+  }
+  async react(messageId, faceId) {
+    const result = await this.call("set_msg_emoji_like", {
+      message_id: String(messageId),
+      emoji_id: String(faceId),
+      set: true,
+    });
+    if (
+      result === false ||
+      result?.result === false ||
+      (typeof result?.result === "number" && result.result !== 0)
+    )
+      throw Error("ONEBOT_REJECTED");
+    return { confirmed: true };
+  }
+  async setTyping(conversation, { signal } = {}) {
+    const target = /^private:(\d+)$/.exec(conversation)?.[1];
+    if (!target || signal?.aborted) return;
+    return this.call(
+      "set_input_status",
+      { user_id: target, event_type: 1 },
+      1000,
+      { signal, maxBytes: 4096 },
+    );
   }
   async send(conversation, segments) {
     const [kind, target] = conversation.split(":");

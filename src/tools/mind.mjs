@@ -1,3 +1,4 @@
+import { withInteraction } from "../core/closeness.mjs";
 import {
   activityFields,
   projectReadSchema,
@@ -384,14 +385,29 @@ function executeMindTool(runtime, ctx, name, args) {
     };
   }
   if (name === "person_note") {
-    const card = identity.savePersonCard(args, {
+    const saved = identity.savePersonCard(args, {
       writtenIn: ctx.conversation,
       now,
     });
+    const card = withInteraction(
+      m,
+      identity.personCard(saved.personId),
+      now,
+      runtime.connection(a.connectionId).accountId,
+    );
     markPersonCardShown(m, ctx.conversation, card);
     return card;
   }
   if (name === "person_notes") {
+    const viewCard = (card) => ({
+      ...withInteraction(
+        m,
+        card,
+        now,
+        runtime.connection(a.connectionId).accountId,
+      ),
+      ...m.corrections.annotation("person", card.id, card.revision),
+    });
     if (args.personIds) {
       const cards = args.personIds.map((id) => identity.personCard(id)),
         boundary = recallBoundary(runtime, ctx);
@@ -408,21 +424,14 @@ function executeMindTool(runtime, ctx, name, args) {
               updatedAt,
               ...(corrections ? { corrections } : {}),
             }));
-          return {
-            ...card,
-            ...m.corrections.annotation("person", card.id, card.revision),
-            diaries,
-          };
+          return { ...viewCard(card), diaries };
         }),
         missing: args.personIds.filter((_, i) => !cards[i]),
       };
     }
-    const rows = identity.personCards().map((c) => ({
-      ...c,
-      ...m.corrections.annotation("person", c.id, c.revision),
-    }));
+    const rows = identity.personCards();
     return {
-      items: rows.slice(args.offset, args.offset + 20),
+      items: rows.slice(args.offset, args.offset + 20).map(viewCard),
       total: rows.length,
       nextOffset: args.offset + 20 < rows.length ? args.offset + 20 : null,
     };

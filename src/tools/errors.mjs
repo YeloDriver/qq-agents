@@ -1,8 +1,16 @@
 // @ts-check
+import { ToneReviewSuggested } from "../core/tone-check.mjs";
+
 // Report actionable validation bounds without echoing input values, paths,
 // stack traces, provider errors or credentials into either model backend.
 /** @param {any} error */
 export function safeToolFailure(error) {
+  if (error instanceof ToneReviewSuggested)
+    return {
+      code: error.message,
+      matches: error.matches,
+      hint: "No delivery was attempted and this requestId was not reserved. Review the wording against Self's speech samples. Rewrite the rejected message using a new requestId, or confirm it is appropriate by resubmitting the exact same requestId and plain text in this turn. For a stopped burst, preserve earlier receipts: you may resubmit the unchanged burst with its original requestId, or rewrite only the rejected item with qq_send and a new requestId. This reminder grants no sending permission and does not clear any delivery or safety boundary.",
+    };
   if (/^ANTIGRAVITY_MEDIA_(FORMAT|LIMIT|FAILED)$/.test(error?.message || ""))
     return {
       code: error.message,
@@ -44,6 +52,10 @@ export function safeToolFailure(error) {
     };
   /** @type {Record<string, string>} */
   const hints = {
+    REACT_ALREADY_ATTEMPTED:
+      "This message and face already have a pending or unknown reaction. Do not submit the same reaction with another requestId. Inspect the original delivery receipt; waiting, rewriting the reference or starting another turn does not establish non-delivery.",
+    REACT_UNSUPPORTED:
+      "The gateway does not support this reaction action. No reaction was confirmed. Do not retry another message, face or requestId to work around missing gateway support.",
     INVALID_MEMORY_SCOPE:
       "The source selector is invalid, not an empty memory result. memory_search conversationType=group/private filters a kind of chat. conversation must be an exact source key such as group:20000 or private:30000; do not use group/private or wildcard keys. Omit conversation to search your own memories across chats, then use the returned source key. conversation_read without conversation only reads the current chat. Keep protected-source restrictions unchanged.",
     DELIVERY_UNKNOWN:
@@ -82,6 +94,8 @@ export function safeToolFailure(error) {
       "This turn was woken only for proactive intentions. A successful cancel/defer remains saved, but does not authorize another proactive send. Read conversation_read or qq_wait_for_messages: fully reading a genuinely new human message received after this wake allows an ordinary reply when no intent is selected. If there is no new input, finish without sending. Do not repeat the blocked burst or change requestId to bypass the gate; preserve all existing receipts.",
     INTENT_CORRECTION_REVIEW_REQUIRED:
       "This intention depends on a corrected belief. Read memory_corrections and the intention, then cancel/update it or mark a genuinely unrelated dependency unaffected. Do not send from this intention until review is complete; preserve existing receipts.",
+    TYPING_NEW_INPUT_REVIEW_REQUIRED:
+      "New human input arrived during typing. Nothing was sent or reserved. Fully read the new messages with conversation_read or qq_wait_for_messages (use memory_read pagination for truncated bodies), then decide whether the planned reply still fits. A metadata-only or truncated read does not clear this gate. Do not mark unread input as processed or replay an unknown delivery.",
     INTENT_STALE_REFRESH_REQUIRED:
       "New input arrived after this intent wake's snapshot. Do not retry the stale proactive decision. If no intent is selected, fully read the new human input to reply normally. If an intent is already selected, finish this turn for the next opportunity; do not mark unhandled input as processed. Preserve the intention and all delivery receipts, without replaying under a new requestId.",
     GITHUB_AUTH_UNAVAILABLE:

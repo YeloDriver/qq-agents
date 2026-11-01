@@ -164,6 +164,9 @@ async function sampleConfig() {
       users: ["30000001", "30000002"],
     },
     wake: { participation: 0.025, cooldownMs: 2500, questions: true },
+    behavior: {
+      actions: { recall: true, recallWindowMs: 45000, recallMaxPerHour: 2 },
+    },
     voice: {
       asr: {
         enabled: true,
@@ -431,4 +434,161 @@ test("a new role starts with empty number lists that still take typed numbers", 
       participation: 0.05,
     },
   );
+});
+
+test("recall controls preserve explicit settings and allow changing limits or disabling", async () => {
+  const config = await sampleConfig(),
+    run = editor(config),
+    original = config.agents[0];
+  const html = run(
+    'agentForm.build(config.agents[0], input("id", "稳定 ID", config.agents[0].id, "readonly"))',
+  );
+  const parse = (changes) =>
+    run("agentForm.parse.bind(agentForm)")(
+      formOf(html, changes),
+      structuredClone(original),
+    ).row.behavior.actions;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(parse({}))),
+    original.behavior.actions,
+  );
+  assert.equal(parse({ recallEnabled: undefined }).recall, false);
+  assert.equal(parse({ recallWindowMs: "60000" }).recallWindowMs, 60000);
+  assert.equal(parse({ recallMaxPerHour: "4" }).recallMaxPerHour, 4);
+});
+
+test("tone reminder settings round-trip and edit separately from Self samples", async () => {
+  const config = await sampleConfig();
+  config.agents[0].behavior.toneCheck = {
+    mode: "off",
+    phrases: ["自定义套话", "另一句话"],
+    maxLinesCasual: 12,
+  };
+  const run = editor(config),
+    html = run('agentForm.build(config.agents[0], "")');
+  assert.match(html, /说话样本/);
+  assert.match(html, /不会覆盖已建立的 Self/);
+  const parse = (set) =>
+    JSON.parse(
+      JSON.stringify(
+        run("agentForm.parse.bind(agentForm)")(
+          formOf(html, set),
+          config.agents[0],
+        ).row,
+      ),
+    );
+  assert.deepEqual(
+    parse({}).behavior.toneCheck,
+    config.agents[0].behavior.toneCheck,
+  );
+  assert.deepEqual(
+    parse({
+      toneCheckMode: "warn",
+      toneCheckPhrases: "新短语\n 再一句 \n",
+      toneCheckMaxLines: "8",
+    }).behavior.toneCheck,
+    {
+      mode: "warn",
+      phrases: ["新短语", "再一句"],
+      maxLinesCasual: 8,
+    },
+  );
+  assert.equal(
+    parse({ toneCheckMode: "warn" }).persona,
+    config.agents[0].persona,
+  );
+});
+
+test("reaction switch and per-minute quota round-trip in the role editor", async () => {
+  const config = await sampleConfig();
+  config.agents[0].behavior.actions = {
+    ...config.agents[0].behavior.actions,
+    react: true,
+    reactMaxPerMinute: 7,
+  };
+  const run = editor(config),
+    html = run('agentForm.build(config.agents[0], "")');
+  assert.match(html, /贴表情回应/);
+  const parse = (set) =>
+    JSON.parse(
+      JSON.stringify(
+        run("agentForm.parse.bind(agentForm)")(
+          formOf(html, set),
+          config.agents[0],
+        ).row,
+      ),
+    );
+  assert.deepEqual(
+    parse({}).behavior.actions,
+    config.agents[0].behavior.actions,
+  );
+  assert.deepEqual(
+    parse({ reactEnabled: undefined, reactMaxPerMinute: "4" }).behavior.actions,
+    {
+      ...config.agents[0].behavior.actions,
+      react: false,
+      reactMaxPerMinute: 4,
+    },
+  );
+});
+
+test("elsewhere switch and window round-trip in the role editor", async () => {
+  const config = await sampleConfig();
+  config.agents[0].behavior.elsewhere = { enabled: true, windowMs: 3600000 };
+  const run = editor(config),
+    html = run('agentForm.build(config.agents[0], "")');
+  assert.match(html, /别处近况/);
+  assert.match(html, /最近 60 分钟/);
+  const parse = (set, original = config.agents[0]) =>
+    JSON.parse(
+      JSON.stringify(
+        run("agentForm.parse.bind(agentForm)")(formOf(html, set), original).row
+          .behavior.elsewhere,
+      ),
+    );
+  assert.deepEqual(parse({}), config.agents[0].behavior.elsewhere);
+  assert.deepEqual(
+    parse({ elsewhereEnabled: undefined, elsewhereWindowMinutes: "720" }),
+    { enabled: false, windowMs: 43200000 },
+  );
+  assert.deepEqual(parse({ elsewhereOwnLookbackMinutes: "120" }), {
+    ...config.agents[0].behavior.elsewhere,
+    ownLookbackMs: 7200000,
+  });
+  // A stored window that is not a whole slider step survives an untouched save.
+  const odd = structuredClone(config.agents[0]);
+  odd.behavior.elsewhere = { enabled: false, windowMs: 1234567 };
+  const oddHtml = editor({ ...config, agents: [odd] })(
+    'agentForm.build(config.agents[0], "")',
+  );
+  assert.match(oddHtml, /别处近况[\s\S]*?已关闭/);
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        run("agentForm.parse.bind(agentForm)")(formOf(oddHtml), odd).row
+          .behavior.elsewhere,
+      ),
+    ),
+    odd.behavior.elsewhere,
+  );
+});
+
+test("a role without stored elsewhere settings keeps the defaults implicit", async () => {
+  const config = await sampleConfig();
+  delete config.agents[0].behavior.elsewhere;
+  const run = editor(config),
+    html = run('agentForm.build(config.agents[0], "")');
+  assert.match(html, /最近 360 分钟/);
+  const row = run("agentForm.parse.bind(agentForm)")(
+    formOf(html),
+    config.agents[0],
+  ).row;
+  assert.deepEqual(JSON.parse(JSON.stringify(row.behavior.elsewhere)), {});
+  const { validateConfig } = await import("../src/core/config.mjs");
+  config.agents[0].behavior = row.behavior;
+  assert.deepEqual(validateConfig(config).agents[0].behavior.elsewhere, {
+    enabled: true,
+    windowMs: 21600000,
+    ownLookbackMs: 86400000,
+  });
 });

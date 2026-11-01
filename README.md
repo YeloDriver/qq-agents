@@ -232,7 +232,8 @@ node src/main.mjs --data /path/to/private-data --port 3210
 - [Prompt 与 Self 的职责](docs/PROMPT-CONTRACTS.md)
 - [审批标识与子进程凭据边界](docs/CREDENTIAL-BOUNDARIES.md)
 - [基线与功能对照](docs/FEATURE-MATRIX.md)
-- [拟人化改进设计：节奏、口吻、作息与关系](docs/plans/2026-11-01-humanlike.md)（设计稿，尚未实现）
+- [拟人化改进设计与实现记录：节奏、口吻、作息与关系](docs/plans/2026-11-01-humanlike.md)（含七项实现 PR 与单独验收边界）
+- [别处近况设计与实施记录：记得刚在别的聊天里和谁说过话](docs/plans/2026-11-01-elsewhere-recent.md)（已实现，配置见 [behavior.elsewhere](docs/CONFIGURATION.md#别处近况behaviorelsewhere)）
 
 **扩展与安全**
 

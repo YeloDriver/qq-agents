@@ -10,8 +10,12 @@
     "skipLibCheck": true
   },
   "include": [
+    "src/core/closeness.mjs",
+    "src/core/message-recall.mjs",
+    "src/memory/recalls.mjs",
     "src/backends/*.mjs",
     "src/core/config-impact.mjs",
+    "src/core/typing-indicator.mjs",
     "src/core/default-config.mjs",
     "src/memory/conversation-state.mjs",
     "src/memory/conversation-due.mjs",
@@ -38,6 +42,12 @@
     "src/core/local-secrets.mjs",
     "src/core/mind-policy.mjs",
     "src/core/policy.mjs",
+    "src/core/reactions.mjs",
+    "src/tools/reactions.mjs",
+
+    "src/core/rhythm.mjs",
+    "src/core/typing.mjs",
+    "src/core/tone-check.mjs",
     "src/memory/migrate.mjs",
     "src/tools/errors.mjs",
     "scripts/memory-benchmark.mjs",
@@ -47,6 +57,7 @@
     "src/memory/migration-apply.mjs",
     "src/core/protected-mind.mjs",
     "src/core/person-cards.mjs",
+    "src/core/elsewhere.mjs",
     "src/core/mood.mjs",
     "src/core/floor.mjs",
     "src/core/runtime-status.mjs",

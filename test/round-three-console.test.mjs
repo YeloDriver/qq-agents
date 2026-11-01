@@ -28,6 +28,7 @@ test("console saves role and optional conversation budgets and explicit schedule
     ids: () => "",
     fillIds: async () => {},
     range: () => "",
+    select: () => "",
     structuredClone,
     find: (table, id) => sandbox.config[table].find((x) => x.id === id),
     document: { querySelectorAll: () => [] },
@@ -39,6 +40,7 @@ test("console saves role and optional conversation budgets and explicit schedule
     action: (fn) => fn(),
     load: async () => {},
     notice() {},
+    savedNotice: () => "已保存并生效",
     api: async (url, payload) => {
       if (url.startsWith("/api/schedules")) return { tasks: [], history: [] };
       assert.equal(url, "/api/config");
@@ -59,6 +61,17 @@ test("console saves role and optional conversation budgets and explicit schedule
   const submit = (id, values) =>
     $(id).onsubmit({ preventDefault() {}, target: values });
   const values = {
+    rhythmEnabled: "on",
+    rhythmTimezone: "Asia/Tokyo",
+    rhythmStart: "23:00",
+    rhythmEnd: "08:00",
+    rhythmMode: "defer",
+    rhythmOwners: "on",
+    rhythmJitter: "20",
+    rhythmProbability: "0.25",
+    rhythmMin: "2",
+    rhythmMax: "8",
+
     observe: "300",
     quiet: "10",
     batch: "4",
@@ -71,9 +84,27 @@ test("console saves role and optional conversation budgets and explicit schedule
     conversationSendHour: "",
     keywords: "",
     speakers: "",
+    typingEnabled: "on",
+    typingIndicator: "on",
+    typingFirst: "on",
+    typingChar: "123",
+    typingJitter: "0.37",
+    typingMin: "0.67",
+    typingMax: "10.25",
+    typingFirstMax: "5.87",
   };
   await submit("#behavior-form", values);
   assert.equal(saved.agents[0].behavior.batchWindowMs, 4000);
+  assert.deepEqual(saved.agents[0].behavior.typing, {
+    enabled: true,
+    indicator: true,
+    firstReply: true,
+    msPerChar: 123,
+    jitter: 0.37,
+    minMs: 670,
+    maxMs: 10250,
+    firstReplyMaxMs: 5870,
+  });
   assert.equal(saved.agents[0].behavior.batchMaxMs, 12000);
   assert.equal(saved.agents[0].behavior.maxSendPerMinute, 2);
   assert.equal(saved.agents[0].behavior.maxSendPerHour, 10);
@@ -84,6 +115,15 @@ test("console saves role and optional conversation budgets and explicit schedule
     saved.agents[0].behavior.conversationMaxSendPerMinute,
     undefined,
   );
+  const disabledTyping = { ...values };
+  delete disabledTyping.typingEnabled;
+  delete disabledTyping.typingIndicator;
+  delete disabledTyping.typingFirst;
+  await submit("#behavior-form", disabledTyping);
+  assert.equal(saved.agents[0].behavior.typing.enabled, false);
+  assert.equal(saved.agents[0].behavior.typing.indicator, false);
+  assert.equal(saved.agents[0].behavior.typing.firstReply, false);
+  assert.equal(saved.agents[0].behavior.typing.jitter, 0.37);
   await submit("#schedule-settings", {
     enabled: "on",
     quietEnabled: "on",

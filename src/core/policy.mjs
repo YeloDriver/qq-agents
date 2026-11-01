@@ -30,11 +30,88 @@ export const behaviorSchema = z
     maxSendPerHour: ms(1, 1000, 60),
     conversationMaxSendPerMinute: z.number().int().min(1).max(60).optional(),
     conversationMaxSendPerHour: z.number().int().min(1).max(1000).optional(),
+    elsewhere: z
+      .object({
+        enabled: z.boolean().default(true),
+        windowMs: ms(600000, 86400000, 21600000),
+        ownLookbackMs: ms(600000, 86400000, 86400000),
+      })
+      .strict()
+      .prefault({}),
+    actions: z
+      .object({
+        react: z.boolean().default(false),
+        reactMaxPerMinute: ms(1, 60, 3),
+        recall: z.boolean().default(false),
+        recallWindowMs: ms(1, 110000, 110000),
+        recallMaxPerHour: ms(1, 60, 3),
+      })
+      .strict()
+      .prefault({}),
     burstMax: ms(1, 10, 8),
     burstMinMs: ms(0, 10000, 1000),
     burstMaxMs: ms(0, 10000, 3000),
     longGapProbability: probability.default(0.2),
     longGapMs: ms(0, 30000, 8000),
+    rhythm: z
+      .object({
+        enabled: z.boolean().default(false),
+        timezone: timezone.optional(),
+        sleep: z
+          .object({
+            start: z
+              .string()
+              .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+              .default("01:00"),
+            end: z
+              .string()
+              .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+              .default("08:30"),
+          })
+          .strict()
+          .prefault({}),
+        sleepMode: z.enum(["defer", "slow"]).default("defer"),
+        urgentOwners: z.boolean().default(true),
+        wakeJitterMs: ms(0, 7200000, 1800000),
+        lateReply: z
+          .object({
+            probability: probability.default(0.1),
+            minMs: ms(0, 3600000, 60000),
+            maxMs: ms(0, 3600000, 600000),
+          })
+          .strict()
+          .prefault({}),
+      })
+      .strict()
+      .prefault({})
+      .refine(
+        (r) =>
+          r.sleep.start !== r.sleep.end &&
+          r.lateReply.maxMs >= r.lateReply.minMs,
+        "INVALID_TIME_RANGE",
+      ),
+    typing: z
+      .object({
+        enabled: z.boolean().default(true),
+        indicator: z.boolean().default(true),
+        msPerChar: ms(0, 2000, 180),
+        jitter: probability.default(0.35),
+        minMs: ms(0, 30000, 600),
+        maxMs: ms(0, 30000, 12000),
+        firstReply: z.boolean().default(true),
+        firstReplyMaxMs: ms(0, 30000, 6000),
+      })
+      .strict()
+      .prefault({})
+      .refine((x) => x.maxMs >= x.minMs, "INVALID_TIME_RANGE"),
+    toneCheck: z
+      .object({
+        mode: z.enum(["off", "warn"]).default("warn"),
+        phrases: z.array(z.string().trim().min(1).max(100)).max(50).default([]),
+        maxLinesCasual: ms(1, 100, 6),
+      })
+      .strict()
+      .prefault({}),
     proactive: z
       .object({
         enabled: z.boolean().default(false),

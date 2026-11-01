@@ -1,3 +1,5 @@
+import { withInteraction } from "../core/closeness.mjs";
+import { recallMessage } from "../core/message-recall.mjs";
 import { deliveryPage } from "../core/chat-context.mjs";
 import { githubMarker, privateGithubSources } from "../github/policy.mjs";
 import { readEventImage } from "./image-read.mjs";
@@ -7,7 +9,10 @@ import { taintMedia } from "./legacy.mjs";
 import { SocialReader } from "../../vendor/social-reader/reader.mjs";
 import { safeFetch } from "../../vendor/social-reader/safe-fetch.js";
 import { recallBoundary, recallPage } from "../core/recall-boundary.mjs";
-import { markPersonCardShown } from "../core/person-cards.mjs";
+import {
+  markPersonCardShown,
+  personCardSeenKey,
+} from "../core/person-cards.mjs";
 function track(ctx, items) {
   for (const row of items) {
     for (const item of [
@@ -142,12 +147,20 @@ async function handle_qq_send(runtime, ctx, args, name) {
   // Someone addressed before they spoke here has not had their card shown.
   // It comes once with the receipt, so the rest of the turn can use it.
   const mem = runtime.memory.bind(ctx.agentId),
-    card = mem.identity.personCard(args.atUserId);
+    saved = mem.identity.personCard(args.atUserId),
+    card = saved
+      ? withInteraction(
+          mem,
+          saved,
+          runtime.now(),
+          runtime.connection(runtime.agent(ctx.agentId).connectionId).accountId,
+        )
+      : null;
   if (
     !card ||
     // The same seen key as person-cards.mjs: this card, at this revision.
     mem.state(ctx.conversation).personCardsShown?.[card.personId] ===
-      `${card.id}:${card.revision}`
+      personCardSeenKey(card)
   )
     return receipt;
   markPersonCardShown(mem, ctx.conversation, card);
@@ -157,6 +170,11 @@ async function handle_qq_send(runtime, ctx, args, name) {
       personId: card.personId,
       call: card.call,
       impression: card.body,
+      interaction: card.interaction,
+      ...(card.adminCloseness ? { adminCloseness: card.adminCloseness } : {}),
+      ...(card.recalledEvidence?.length
+        ? { recalledEvidence: card.recalledEvidence }
+        : {}),
       revision: card.revision,
     },
   };
@@ -318,6 +336,7 @@ export const coreHandlers = {
   diary_write: handle_diary_write,
   diary_revise: handle_diary_write,
   qq_send: handle_qq_send,
+  qq_recall: recallMessage,
   qq_delivery_status: (runtime, ctx, args) =>
     deliveryPage(runtime.memory.bind(ctx.agentId), ctx.conversation, args),
   generated_image_list: handle_generated_image_list,

@@ -1,3 +1,4 @@
+import { waitFirstReply } from "./typing.mjs";
 import { recallBoundary } from "./recall-boundary.mjs";
 import { containsCredential } from "./secrets.mjs";
 import { beforeShareDelivery } from "../apps/sharing.mjs";
@@ -5,6 +6,7 @@ import { appService } from "../apps/tools.mjs";
 import { privateGithubSources } from "../github/policy.mjs";
 import { taintMedia } from "../tools/legacy.mjs";
 import { mdToPlain } from "../../vendor/dsh-qq/md-to-plain.js";
+import { checkTone } from "./tone-check.mjs";
 import { reserveSendBudget } from "./send-budget.mjs";
 import { replyPeers, peerReplyLastAttemptAt } from "./peer-replies.mjs";
 import {
@@ -42,6 +44,8 @@ export class DeliveryService {
   constructor(runtime) {
     this.runtime = runtime;
     this.chains = new Map();
+    this.queues = new Map();
+    this.conversations = new Map();
     this.reconciled = new Set();
   }
   async send(
@@ -60,6 +64,15 @@ export class DeliveryService {
     runtime.assertSafeOutput(ctx, text);
     text = mdToPlain(text);
     if (!text && !mediaId) throw Error("EMPTY_MESSAGE");
+    // Existing receipts must retain their duplicate/conflict/unknown semantics;
+    // only a new valid request can receive a pre-delivery wording reminder.
+    if (
+      typeof requestId === "string" &&
+      requestId &&
+      requestId.length <= 200 &&
+      !mem.delivery(requestId)
+    )
+      checkTone(ctx, a, requestId, text);
     const segments = [];
     const connection = runtime.connection(a.connectionId),
       namespace = connection.messageIdNamespace || "onebot",
@@ -98,6 +111,7 @@ export class DeliveryService {
       requestId,
       intent: segments,
       body: archiveBody ?? text,
+      typingText: text + (mediaId ? "◻" : ""),
       metadata: {
         replyTo,
         requestedReplyTo,
@@ -116,26 +130,74 @@ export class DeliveryService {
     const runtime = this.runtime;
     const a = runtime.assertActive(ctx);
     ctx.pendingDeliveries = (ctx.pendingDeliveries || 0) + 1;
+    // Drain tracking includes typing, but only ready deliveries occupy the queue.
     const previous = this.chains.get(a.connectionId);
-    const result = previous
-      ? previous.catch(() => {}).then(() => this.deliverNow(ctx, operation))
-      : this.deliverNow(ctx, operation);
-    this.chains.set(a.connectionId, result);
+    const key = a.connectionId + "|" + ctx.conversation;
+    const priorConversation = this.conversations.get(key);
+    // Preserve call order within a chat, without holding other chats behind its typing.
+    const result = priorConversation
+      ? priorConversation
+          .catch(() => {})
+          .then(() => this.deliverAfterTyping(ctx, operation))
+      : this.deliverAfterTyping(ctx, operation);
+    this.conversations.set(key, result);
+    const drained = Promise.allSettled([previous, result]);
+    this.chains.set(a.connectionId, drained);
+    drained.then(() => {
+      if (this.chains.get(a.connectionId) === drained)
+        this.chains.delete(a.connectionId);
+    });
     try {
       return await result;
     } finally {
       ctx.pendingDeliveries--;
-      if (this.chains.get(a.connectionId) === result)
-        this.chains.delete(a.connectionId);
+      if (this.conversations.get(key) === result)
+        this.conversations.delete(key);
     }
   }
-  async deliverNow(
+  async deliverAfterTyping(ctx, operation) {
+    if (operation.typingText !== undefined) {
+      const { receipt } = this.checkDelivery(ctx, operation, {
+        beforeTyping: true,
+      });
+      if (!receipt) {
+        const wait = waitFirstReply(
+          this.runtime,
+          ctx,
+          operation.typingText,
+          operation.typingFallbackMs,
+        );
+        if (wait) await wait;
+      }
+    }
+    const a = this.runtime.assertActive(ctx);
+    const previous = this.queues.get(a.connectionId);
+    const result = previous
+      ? previous.catch(() => {}).then(() => this.deliverNow(ctx, operation))
+      : this.deliverNow(ctx, operation);
+    this.queues.set(a.connectionId, result);
+    try {
+      return await result;
+    } finally {
+      if (this.queues.get(a.connectionId) === result)
+        this.queues.delete(a.connectionId);
+    }
+  }
+  checkDelivery(
     ctx,
-    { requestId, intent, body = "", metadata = {}, send, action = false },
+    {
+      requestId,
+      intent,
+      body = "",
+      metadata = {},
+      action = false,
+      actionBudget,
+    },
+    { beforeTyping = false } = {},
   ) {
     const runtime = this.runtime;
-    const a = runtime.assertActive(ctx),
-      mem = runtime.memory.bind(a.id);
+    const a = runtime.assertActive(ctx);
+    const mem = runtime.memory.bind(a.id);
     assertMessageAccount(
       mem,
       a.connectionId,
@@ -143,7 +205,13 @@ export class DeliveryService {
     );
     if (mem.state(ctx.conversation).silenceUntil > runtime.now())
       throw Error("CONVERSATION_SILENCED");
-    const proactive = runtime.subject.beforeDelivery(ctx);
+    // Recall only removes an already-confirmed message. A completed contact
+    // intent must not prevent that cleanup; fresh outward actions still need
+    // the ordinary intent decision and contact checks.
+    const cleanupAction = action && actionBudget?.kind === "recall";
+    const proactive = cleanupAction
+      ? null
+      : runtime.subject.beforeDelivery(ctx);
     if (proactive) requestId = "intent:" + proactive.id;
     if (typeof requestId !== "string" || !requestId || requestId.length > 200)
       throw Error("INVALID_REQUEST_ID");
@@ -154,12 +222,16 @@ export class DeliveryService {
       throw Error("SENSITIVE_OUTPUT_BLOCKED");
     const previous = mem.delivery(requestId);
     if (previous) {
+      // An in-flight receipt may settle before our queue slot; only skip typing here.
+      if (beforeTyping) return { receipt: previous };
       mem.reserveDelivery(requestId, ctx.conversation, intent);
       if (previous.status === "sent")
         return {
-          status: "sent",
-          messageId: previous.message_id,
-          duplicate: true,
+          receipt: {
+            status: "sent",
+            messageId: previous.message_id,
+            duplicate: true,
+          },
         };
       throw Error(
         "DELIVERY_ALREADY_ATTEMPTED_" + previous.status.toUpperCase(),
@@ -171,6 +243,23 @@ export class DeliveryService {
     if (ctx.recoveryDeliveryBlocked) throw Error("RECOVERY_DELIVERY_BLOCKED");
     if (metadata.mediaId)
       runtime.generatedImages.assertDelivery(ctx, metadata.mediaId, requestId);
+    return { a, mem, proactive, requestId, cleanupAction };
+  }
+  async deliverNow(ctx, operation) {
+    const runtime = this.runtime;
+    const { a, mem, proactive, requestId, cleanupAction, receipt } =
+      this.checkDelivery(ctx, operation);
+    if (receipt) return receipt;
+    const {
+      intent,
+      body = "",
+      metadata = {},
+      send,
+      action = false,
+      actionBudget,
+      validate,
+    } = operation;
+    validate?.();
     const state = mem.state(ctx.conversation),
       now = runtime.now();
     const batchUsed = proactive
@@ -191,9 +280,29 @@ export class DeliveryService {
       a.maxConsecutiveSends ?? a.maxSendsPerTurn,
       ordinaryPeer ? runtime.config.peerLimit.maxMessages : Infinity,
     );
-    if (batchUsed >= batchLimit) throw Error("REPLY_BURST_LIMIT");
+    if (!actionBudget && batchUsed >= batchLimit)
+      throw Error("REPLY_BURST_LIMIT");
+    if (actionBudget) {
+      for (const [duration, limit] of [
+        [60000, actionBudget.maxPerMinute],
+        [3600000, actionBudget.maxPerHour],
+      ]) {
+        if (limit == null) continue;
+        const used = mem.db
+          .prepare(
+            "SELECT count(*) AS n FROM events WHERE agent_id=? AND kind='message.send-attempt' AND json_extract(payload,'$.actionKind')=? AND observed_at>?",
+          )
+          .get(
+            a.id,
+            actionBudget.kind,
+            new Date(now - duration).toISOString(),
+          ).n;
+        if (used >= limit) throw Error(actionBudget.errorCode);
+      }
+    }
     const transport = runtime.transports.get(a.connectionId);
     if (!transport?.connected) throw Error("QQ_NOT_CONNECTED");
+    const actionKind = action ? actionBudget?.kind || intent?.kind : null;
     const event = {
       connectionId: a.connectionId,
       conversation: ctx.conversation,
@@ -203,6 +312,9 @@ export class DeliveryService {
       payload: {
         requestId,
         ...metadata,
+        ...(action
+          ? { deliveryType: "action", ...(actionKind ? { actionKind } : {}) }
+          : {}),
         protectedRepositories: privateGithubSources(ctx, runtime),
       },
     };
@@ -225,7 +337,7 @@ export class DeliveryService {
         state.replyBatchLastAttemptAt == null
           ? { replyBatchLastAttemptAt: peerReplyLastAttemptAt(state) }
           : {}),
-        ...(!proactive && !ctx.internalDelivery
+        ...(!actionBudget && !proactive && !ctx.internalDelivery
           ? ctx.scheduleRunId
             ? {
                 scheduleReplyCounts: {
@@ -241,7 +353,7 @@ export class DeliveryService {
               }
           : {}),
       });
-      runtime.subject.reserveContact(ctx, proactive);
+      if (!cleanupAction) runtime.subject.reserveContact(ctx, proactive);
       mem.append({
         ...event,
         dedupe: "send:" + requestId + ":pending",
@@ -249,17 +361,18 @@ export class DeliveryService {
         status: "pending",
       });
     });
-    ctx.replyBatchSends = (ctx.replyBatchSends ?? ctx.sendCount) + 1;
+    if (!actionBudget)
+      ctx.replyBatchSends = (ctx.replyBatchSends ?? ctx.sendCount) + 1;
     ctx.deliveryAttempted = true;
     this.reconciled.add(a.id);
-    ctx.sendCount++;
+    if (!actionBudget) ctx.sendCount++;
     try {
       runtime.assertActive(ctx);
     } catch (e) {
       // Paused or cancelled before the gateway call: nothing left the process.
       mem.store.transaction(() => {
         mem.completeDelivery(requestId, "failed");
-        runtime.subject.delivered(ctx, "failed");
+        if (!cleanupAction) runtime.subject.delivered(ctx, "failed");
       });
       mem.append({
         ...event,
@@ -279,10 +392,12 @@ export class DeliveryService {
         receipt.messageId == null ? null : String(receipt.messageId);
       mem.store.transaction(() => {
         mem.completeDelivery(requestId, "sent", messageId);
-        runtime.subject.delivered(ctx, "sent");
+        if (!cleanupAction) runtime.subject.delivered(ctx, "sent");
       });
-      ctx.confirmedSends = (ctx.confirmedSends || 0) + 1;
-      runtime.conversations.sent(ctx);
+      if (!actionBudget) {
+        ctx.confirmedSends = (ctx.confirmedSends || 0) + 1;
+        runtime.conversations.sent(ctx);
+      }
       const record = mem.append({
         ...event,
         dedupe: "send:" + requestId + ":sent",
@@ -321,7 +436,7 @@ export class DeliveryService {
         throw Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: e });
       mem.store.transaction(() => {
         mem.completeDelivery(requestId, status);
-        runtime.subject.delivered(ctx, status);
+        if (!cleanupAction) runtime.subject.delivered(ctx, status);
       });
       mem.append({
         ...event,
@@ -330,6 +445,12 @@ export class DeliveryService {
         status,
         payload: { ...event.payload, ...(reason ? { reason } : {}) },
       });
+      if (
+        status === "failed" &&
+        e.reason === "ACTION_UNSUPPORTED" &&
+        actionBudget?.kind === "recall"
+      )
+        throw Error("RECALL_UNSUPPORTED", { cause: e });
       throw Error(
         "DELIVERY_" +
           status.toUpperCase() +

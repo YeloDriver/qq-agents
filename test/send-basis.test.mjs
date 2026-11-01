@@ -186,6 +186,14 @@ test("qq_send brings the card of someone addressed before they spoke, once per v
     personId: "30000",
     call: "阿明",
     impression: "说话很直的老朋友",
+    interaction: {
+      windowDays: 30,
+      exchanges: 0,
+      theyStarted: 0,
+      youStarted: 0,
+      youStartedAnswered: 0,
+      lastDirectAt: null,
+    },
     revision: 1,
   });
   assert.equal(

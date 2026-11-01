@@ -2,6 +2,7 @@
 // A model session meets a person card once: when that person first comes up
 // there, and again only after the card changes. A new session starts with
 // none seen, so a card never repeats turn after turn.
+import { adminCloseness, personInteraction } from "./closeness.mjs";
 import { resolveMessage, scopeFor } from "../memory/message-ids.mjs";
 
 const MAX_CARDS_PER_TURN = 10;
@@ -10,9 +11,20 @@ const QQ = /^\d{5,12}$/;
 // only when an archived message kept no segments.
 const MENTION = /\[提及 QQ:(\d{5,12})\]/g;
 const QUOTE = /\[引用:([^\]\s]{1,128})\]/g;
-// What a session has seen: this card, at this revision.
+// Source withdrawal and an administrator closeness can change without a new card revision.
+// Show that update once, then retain the same quiet card behavior.
 /** @param {any} card */
-const seenKey = (card) => `${card.id}:${card.revision}`;
+export const personCardSeenKey = (card) => {
+  const recalled = (card.recalledEvidence || [])
+    .map((/** @type {any} */ source) => source.recalled.eventId)
+    .sort()
+    .join(",");
+  // Contact counts move every day and are not a reason to show a card again;
+  // an administrator's statement is.
+  const admin = card.adminCloseness ?? adminCloseness(card);
+  const relationship = admin ? ":admin-closeness:" + admin : "";
+  return `${card.id}:${card.revision}${recalled ? ":recalled:" + recalled : ""}${relationship}`;
+};
 
 /** @param {any} event An archived events row. */
 export function references(event) {
@@ -79,7 +91,7 @@ function lastName(memory, id) {
  * @param {any} memory Bound agent memory.
  * @param {string} conversation
  * @param {any[]} items Records this turn shows the model.
- * @param {{fresh: boolean, accountId: string}} options
+ * @param {{fresh: boolean, accountId: string, now?: number}} options
  */
 export function personCardsForTurn(memory, conversation, items, options) {
   const shown = options.fresh
@@ -94,19 +106,30 @@ export function personCardsForTurn(memory, conversation, items, options) {
   )) {
     if (cards.length >= MAX_CARDS_PER_TURN) break;
     const card = memory.identity.personCard(id);
-    if (!card || shown[id] === seenKey(card)) continue;
+    if (!card || shown[id] === personCardSeenKey(card)) continue;
+    const admin = adminCloseness(card);
     const nickname = lastName(memory, id);
     cards.push({
       personId: card.personId,
       ...(nickname ? { nickname } : {}),
       call: card.call,
       impression: card.body,
+      interaction: personInteraction(
+        memory,
+        id,
+        options.now ?? Date.now(),
+        options.accountId,
+      ),
+      ...(admin ? { adminCloseness: admin } : {}),
+      ...(card.recalledEvidence?.length
+        ? { recalledEvidence: card.recalledEvidence }
+        : {}),
       ...memory.corrections.annotation("person", card.id, card.revision),
       revision: card.revision,
       updatedAt: card.updatedAt,
       ...(card.author === "admin" ? { editedBy: "admin" } : {}),
     });
-    shown[id] = seenKey(card);
+    shown[id] = personCardSeenKey(card);
   }
   return { cards, shown };
 }
@@ -118,7 +141,7 @@ export function markPersonCardShown(memory, conversation, card) {
     ...state,
     personCardsShown: {
       ...state.personCardsShown,
-      [card.personId]: seenKey(card),
+      [card.personId]: personCardSeenKey(card),
     },
   });
 }

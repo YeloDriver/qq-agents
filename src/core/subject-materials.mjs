@@ -1,3 +1,4 @@
+import { adminCloseness, personInteraction } from "./closeness.mjs";
 import { APP_CAPABILITIES } from "../apps/adapter.mjs";
 import { APP_LEDGER, inAppHours } from "../apps/policy.mjs";
 import { githubMarker } from "../github/policy.mjs";
@@ -19,11 +20,16 @@ const clip = (text, max) => {
 // Enough of a private target's own card to decide whether to reach out; the
 // chat it hands off to shows the whole card. Cards hold no protected material,
 // and reading one here does not count as that chat having seen it.
-function cardBrief(memory, target) {
+function cardBrief(memory, target, now, accountId) {
   const id = /^private:(\d+)$/.exec(target)?.[1];
   const card = id && memory.identity.personCard(id);
-  if (!card) return {};
+  if (!id) return {};
+  const interaction = personInteraction(memory, id, now, accountId);
+  if (!card) return { interaction };
+  const admin = adminCloseness(card);
   return {
+    interaction,
+    ...(admin ? { adminCloseness: admin } : {}),
     call: card.call,
     impression: clip(card.body, IMPRESSION_CHARS),
     ...memory.corrections.annotation("person", card.id, card.revision),
@@ -169,9 +175,15 @@ export function subjectMaterials(runtime, ctx) {
     nextContactAt: iso(
       (subject.lastContactAt || 0) + a.subject.contactCooldownMs,
     ),
+    // Listed in configuration order: whom to think of is the agent's choice.
     targets: runtime.subject.reachableTargets(a).map((x) => ({
       ...x,
-      ...cardBrief(m, x.target),
+      ...cardBrief(
+        m,
+        x.target,
+        now,
+        runtime.connection(a.connectionId).accountId,
+      ),
       lastHeardAt: lastAt.get(a.id, x.target, "message.received")?.at || null,
       lastSaidAt: lastAt.get(a.id, x.target, "message.sent")?.at || null,
       cooldownUntil: iso(m.state(x.target).proactiveCooldownUntil || 0),

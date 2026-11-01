@@ -1,5 +1,6 @@
 // Shared by configuration defaults and the tool registry without loading handlers.
 export const TOOL_NAMES = Object.freeze([
+  "qq_recall",
   "protected_work_submit",
   "github_capabilities",
   "github_search",
@@ -79,6 +80,7 @@ export const TOOL_NAMES = Object.freeze([
   "game_view",
   "game_act",
   "game_close",
+  "qq_react",
   "memory_search",
   "memory_related",
   "memory_read",

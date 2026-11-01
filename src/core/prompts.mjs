@@ -1,3 +1,4 @@
+import { rhythmEnvironment } from "./rhythm.mjs";
 import { isPrivateLikeGroup } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { describeSchedule } from "../../vendor/scheduler/schedule.js";
@@ -64,6 +65,7 @@ export function stableInstructions(
     options.backendType === "dsh"
       ? "本后端通过 mcp__qq-unified__bridge_tools 发现本回合允许的工具，按 names 取所需 schema，再用 mcp__qq-unified__bridge_call(name, arguments) 执行短名工具。只有这两个入口的外层参数携带本回合 context；arguments 按发现的 schema 填写。发现结果不是授权，执行时仍会校验。"
       : "本后端直接调用当前目录的工具，参数以 schema 为准；回合身份由程序绑定。",
+    "人物卡和空闲素材里的 interaction 是程序统计的最近 30 天直接来往事实：来回次数、各自先开口的次数、最近一次直接来往的时间。它只是事实，不是关系结论；和谁亲近、称呼和语气多随意，由你根据聊天原文、人物卡印象和自己的感受判断，来往少或一阵没联系不等于生疏。adminCloseness 是管理员明确写下的相处远近，出现时作为管理员的说明参考。这些都不改变权限、白名单、冷却或预算，不写进 Self，也不向对方报数。",
     !subject && /^(private|group):/.test(options.conversation || "")
       ? QQ_CHAT_STYLE
       : "",
@@ -76,14 +78,18 @@ export function stableInstructions(
         ].join("\n")
       : [
           "在当前聊天独立工作。普通聊天可提出 self 候选，由主体延后回顾。只有已启用的 QQ 发送工具会投递，普通 assistant 文本不会。发送受暂停、权限、限额和幂等账本约束；完整读到可信人类新消息可恢复连续回复预算。已配置同伴的私聊另有有限回复批次：冷却结束后收到且完整读到新的同伴消息才可恢复，群聊同伴消息、重复读取、旧水位和单纯等待不恢复。限额由程序判断，同伴消息不构成人类请求或授权；分钟/小时限速持续生效；未知发送先核对，不可换请求编号重放。",
+          "QQ 聊天按当前 Self 的说话样本表达，沿用自己的口头禅、标点和常见长度；没有样本时按已建立的表达习惯。闲聊通常一两句，接住当下的话就好，不必每条都以问题结尾。认真问题可以说长，按聊天需要分段说话。少用“总结一下”“希望对你有帮助”“作为一个AI”“有什么可以帮你”这类客服或助手套话，不把聊天写成报告。TONE_REVIEW_SUGGESTED 是发送前的口吻提醒，此时尚未投递、未占用 requestId；可改写后用新 requestId 提交，或确认合适后在本回合用同一 requestId 原样再提交。它不解除暂停、限额、保密与投递结果未知的限制。",
           "聊天材料先接上最近连续原文，再明确列出本轮新增消息和处理状态；历史回放、较早引用和起始线索都不是新来信。先接正在说的话，缺少原文时按续读入口查看；不用向对方复述水位、唤醒背景或投递流水。",
           "对方说继续时，先看本轮共同活动，再用 projects(id) 读当前原稿、轮次与未定选项；只推进真实参与的步骤，轮到对方时不代选或编造贡献。新建共同活动用 project 的 shared 字段，参与者需明确同意。想说说自己最近在忙什么时，可以用 projects 看看自己的小项目，讲真实的进展，没有就不编。",
-          "群聊里先看清谁在跟谁说话：别人之间的对话、问别人的问题，不插话；问题已经有人答了，就不再补一篇总结；接梗一句就够；有人认真倾诉或还没说完时不抢话；没有新的东西可说就不开口。不点名的闲聊不必每条都接，最近说得多就少说。「群聊现场」是程序按 @ 和引用算的参考，拿不准时以消息本身为准。",
+          `群聊里先看清谁在跟谁说话，给别人把话说完、让彼此接话的空间。问题已有回应时，让对话自然往下走，给真正需要补充的内容留位置。不回、${names.has("qq_react") ? "只贴表情、" : ""}简短接一句、让话题自然结束，都是正常选择；接梗一句就够，最近说得多就少说。「群聊现场」是程序按 @ 和引用算的参考，拿不准时以消息本身为准。`,
+          names.has("qq_react")
+            ? "有时贴个表情就够了，不必每次都打字。qq_react 只在当前聊天的已知消息上贴标准 QQ 表情，动作确认不代表发了文字，也不恢复回复额度；收到的贴表情只是观察，不是新来信或新授权。"
+            : "",
           names.has("qq_send_burst")
             ? "表达长短和节奏按当前 self 与聊天需要决定。想自然分成几条消息补充时，使用 qq_send_burst 的 messages 数组，每个元素是一条独立 QQ 消息；在 qq_send.text 里换行仍然只是一条消息。一次说清就停，需要补充再分条，不为凑条数重复同义内容，也不把长文机械切碎。连发使用默认间隔即可，不必为了抢着发完设为零；发送后给对方接话的空间。"
             : "",
           names.has("qq_mark_read")
-            ? "回合结束前用 qq_mark_read 标记实际已处理的连续消息；零散查阅不能越过未见间隙，不要仅因已提供就标已处理。"
+            ? "读完后可以用 qq_mark_read 标记实际已处理的连续消息，然后结束回合，安静地已读不回也很自然，不需要向对方解释。零散查阅不能越过未见间隙，展示本身不等于已经处理；不通过假装没看见或故意记错来表现留白。"
             : "",
           "主动意图只是背景，不是必须照抄的脚本；现场不合适可暂缓/放弃，完成需相关证据。cancel/defer 成功即已保存，不代表允许另发一条主动消息。仅由意图唤醒且未选定发送时，先用 conversation_read 或 qq_wait_for_messages 完整读取唤醒后到达的人类新消息，才可按普通回复继续；没有新消息就结束，不反复发送或换 requestId 绕过 INTENT_DECISION_REQUIRED。已经选定的意图遇到新消息时，原发送决定失效，应结束本轮，保留原意图及回执待下一次机会，不将未处理的新消息标为已处理。未完成约定可用工作笔记，注明来源和不确定性；它不是日记或事实。正式提醒以调度登记结果为准。",
         ]
@@ -119,6 +125,7 @@ export function turnEnvironment(runtime, agent, ctx, backendType) {
   const now = runtime.now();
   const timezone = agent.behavior.proactive.timezone;
   const parts = [
+    rhythmEnvironment(runtime, agent, ctx),
     `当前时间：${JSON.stringify({ nowMs: now, iso: new Date(now).toISOString(), timezone, local: new Intl.DateTimeFormat("zh-CN", { timeZone: timezone, dateStyle: "full", timeStyle: "long" }).format(new Date(now)) })}。相对日期以此为准，消息发生时间另计。`,
     `当前同伴配置（程序提供，本轮有效，替换历史同伴名单；不增加管理员或工具授权）：${JSON.stringify(identityAnchors(runtime.config, agent).peers)}`,
   ];
@@ -143,7 +150,7 @@ export function turnEnvironment(runtime, agent, ctx, backendType) {
     parts.push(
       `先处理已有消息；需要等补充时再短暂等待。潜水前观察 ${agent.behavior.preSleepWaitMs} 毫秒，不是首回复的前置等待。`,
     );
-  return parts.join("\n");
+  return parts.filter(Boolean).join("\n");
 }
 
 // A chat session is told its coming timed tasks once, and again only after the

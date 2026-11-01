@@ -339,6 +339,40 @@ async function renderSchedules() {
     ${parityOptionalNumber("conversationSendMinute", "单会话投递上限／分钟（可选）", b.conversationMaxSendPerMinute)}${parityOptionalNumber("conversationSendHour", "单会话投递上限／小时（可选）", b.conversationMaxSendPerHour)}
     <p class="hint">角色总额度由所有群和私聊共享，文本、文件及其他投递统一计数；失败或未知回执也占用额度。连续回复批次另按角色设置限制。</p></div>`,
       { summary: esc(wakeMoreSummary(b)), cls: "fold-inner" },
+    )}${fold(
+      "schedule-rhythm",
+      "作息与慢回复",
+      `<div class="form-grid">${parityCheck("rhythmEnabled", "启用作息", b.rhythm.enabled)}
+      ${parityField("rhythmTimezone", "时区（留空跟随主动联系）", b.rhythm.timezone || "", "text", "Asia/Shanghai")}
+      ${parityField("rhythmStart", "入睡时间", b.rhythm.sleep.start, "time")}${parityField("rhythmEnd", "起床时间", b.rhythm.sleep.end, "time")}
+      ${select("rhythmMode", "睡觉时收到消息", b.rhythm.sleepMode, [
+        ["defer", "起床后处理"],
+        ["slow", "慢一些回复"],
+      ])}
+      ${parityCheck("rhythmOwners", "主人私聊可叫醒", b.rhythm.urgentOwners)}
+      ${range("rhythmJitter", "起床后随机延后上限", b.rhythm.wakeJitterMs / 60000, { min: 0, max: 120, step: 1, unit: " 分钟" })}
+      ${range("rhythmProbability", "普通消息偶尔慢回复", b.rhythm.lateReply.probability, { min: 0, max: 1, step: 0.01, unit: "%" })}
+      ${range("rhythmMin", "慢回复最少等待", b.rhythm.lateReply.minMs / 60000, { min: 0, max: 60, step: 1, unit: " 分钟" })}${range("rhythmMax", "慢回复最多等待", b.rhythm.lateReply.maxMs / 60000, { min: 0, max: 60, step: 1, unit: " 分钟" })}
+      </div><p class="hint">默认关闭。时区示例：Asia/Shanghai。只推迟普通唤醒，定时任务和已选定意图不受影响；睡觉时暂停空闲活动和主动联系，额度不增加。被 @ 或被引用不套用随机慢回复；睡觉期间遵循所选的处理方式。</p>`,
+      {
+        summary: b.rhythm.enabled
+          ? `${esc(b.rhythm.sleep.start)}–${esc(b.rhythm.sleep.end)}`
+          : "未开启",
+        cls: "fold-inner",
+      },
+    )}${fold(
+      "schedule-typing",
+      "打字节奏",
+      `<div class="form-grid">${parityCheck("typingEnabled", "按内容长度等待", b.typing.enabled)}${parityCheck("typingFirst", "首条也等待", b.typing.firstReply)}${parityCheck("typingIndicator", "私聊“正在输入”", b.typing.indicator)}
+    ${range("typingChar", "每字耗时", b.typing.msPerChar, { min: 0, max: 2000, step: 10, unit: " 毫秒" })}${range("typingJitter", "打字抖动", b.typing.jitter, { min: 0, max: 1, step: 0.01, unit: "%" })}
+    ${range("typingMin", "单条最短等待", b.typing.minMs / 1000, { min: 0, max: 30, step: 0.1, unit: " 秒" })}${range("typingMax", "单条最长等待", b.typing.maxMs / 1000, { min: 0, max: 30, step: 0.1, unit: " 秒" })}${range("typingFirstMax", "首条最长等待", b.typing.firstReplyMaxMs / 1000, { min: 0, max: 30, step: 0.1, unit: " 秒" })}
+    </div><p class="hint">短句快、长段慢；表情、链接和图片各按一字计。连发时偶尔叠加走神停顿，显式 gapMs 优先。关闭后恢复原来的随机连发间隔，首条不等；固定定时文字和故障提示不等待。私聊输入状态尽力显示，网关不支持时照常发送。首条等待超过三秒时遇到新消息，会先让角色读完再决定。</p>`,
+      {
+        summary: b.typing.enabled
+          ? "按长度等待 · 首条最多 " + b.typing.firstReplyMaxMs / 1000 + " 秒"
+          : "已关闭 · 原随机间隔",
+        cls: "fold-inner",
+      },
     )}<button class="primary">保存唤醒与节奏</button></form>`,
       { summary: esc(wakeSummary(a)) },
     )}
@@ -379,7 +413,36 @@ async function renderSchedules() {
         maxWakePerHour: num("wakeHour"),
         maxSendPerHour: num("sendHour"),
         maxSendPerMinute: num("sendMinute"),
+        typing: {
+          ...agent.behavior.typing,
+          enabled: f.has("typingEnabled"),
+          indicator: f.has("typingIndicator"),
+          firstReply: f.has("typingFirst"),
+          msPerChar: num("typingChar"),
+          jitter: num("typingJitter"),
+          minMs: Math.round(num("typingMin") * 1000),
+          maxMs: Math.round(num("typingMax") * 1000),
+          firstReplyMaxMs: Math.round(num("typingFirstMax") * 1000),
+        },
       });
+      agent.behavior.rhythm = {
+        enabled: f.has("rhythmEnabled"),
+        ...(String(f.get("rhythmTimezone")).trim()
+          ? { timezone: String(f.get("rhythmTimezone")).trim() }
+          : {}),
+        sleep: {
+          start: String(f.get("rhythmStart")),
+          end: String(f.get("rhythmEnd")),
+        },
+        sleepMode: String(f.get("rhythmMode")),
+        urgentOwners: f.has("rhythmOwners"),
+        wakeJitterMs: Math.round(num("rhythmJitter") * 60000),
+        lateReply: {
+          probability: num("rhythmProbability"),
+          minMs: Math.round(num("rhythmMin") * 60000),
+          maxMs: Math.round(num("rhythmMax") * 60000),
+        },
+      };
       for (const [input, key] of [
         ["conversationSendMinute", "conversationMaxSendPerMinute"],
         ["conversationSendHour", "conversationMaxSendPerHour"],
@@ -400,9 +463,13 @@ async function renderSchedules() {
         poke: f.has("poke"),
         joins: f.has("joins"),
       });
-      await api("/api/config", { config: next, revision }, "PUT");
+      const result = await api(
+        "/api/config",
+        { config: next, revision },
+        "PUT",
+      );
       await load();
-      notice("作息已保存；已有连接需手动重连");
+      notice(savedNotice(result));
     });
   $("#schedule-settings").onsubmit = (e) =>
     action(async () => {

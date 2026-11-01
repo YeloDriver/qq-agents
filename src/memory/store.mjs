@@ -1,3 +1,5 @@
+import { withoutClosenessCache } from "../core/closeness.mjs";
+import { recallAnnotation } from "./recalls.mjs";
 import fs from "node:fs";
 import { Corrections } from "./corrections.mjs";
 import { qqFaces } from "../transport/qq-faces.mjs";
@@ -24,6 +26,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 const json = JSON.stringify;
 const parse = (s) => JSON.parse(s);
+// New action attempts carry an explicit type. The bounded legacy kinds were
+// already persisted before that marker; body wording never establishes a type.
+const actionDelivery = (payload) =>
+  payload.deliveryType === "action" ||
+  ["react", "recall", "poke"].includes(payload.actionKind);
 const now = () => new Date().toISOString();
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const text = (s, max = 2 * 1024 * 1024) => {
@@ -66,6 +73,9 @@ function budget(items, maxChars) {
         id: item.id,
         type: item.type,
         seq: item.seq,
+        ...(item.recalled
+          ? { recalled: item.recalled, recallNotice: item.recallNotice }
+          : {}),
         conversation: item.conversation,
         disclosure: item.disclosure,
         ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
@@ -105,6 +115,7 @@ export class MemoryStore {
         this.db.exec(`
       CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,agent_id TEXT NOT NULL,dedupe TEXT NOT NULL,connection_id TEXT NOT NULL,conversation TEXT NOT NULL,kind TEXT NOT NULL,direction TEXT NOT NULL,status TEXT NOT NULL,message_id TEXT,sender_id TEXT,occurred_at TEXT NOT NULL,observed_at TEXT NOT NULL,body TEXT NOT NULL,payload TEXT NOT NULL,origin TEXT NOT NULL,UNIQUE(agent_id,dedupe));
       CREATE INDEX IF NOT EXISTS events_scope ON events(agent_id,conversation,seq);
+      CREATE INDEX IF NOT EXISTS events_recall_projection ON events(agent_id,json_extract(payload,'$.recalledEventId')) WHERE kind='action.confirmed';
       CREATE INDEX IF NOT EXISTS events_scene ON events(agent_id,connection_id,conversation,seq);
       CREATE INDEX IF NOT EXISTS events_message_ref ON events(agent_id,connection_id,conversation,message_id);
       CREATE INDEX IF NOT EXISTS events_people ON events(agent_id,sender_id,occurred_at);
@@ -329,6 +340,9 @@ class AgentMemory {
       };
     return undefined;
   }
+  recallAnnotation(id) {
+    return recallAnnotation(this.db, this.agentId, id);
+  }
   event(row, current, summary = false) {
     const transcript = row.kind === "voice.transcript",
       voiceTranscript = this.voiceTranscript(row, summary),
@@ -368,6 +382,7 @@ class AgentMemory {
       ...(faces ? { qqFaces: faces } : {}),
       ...provenance(row),
       ...this.corrections.annotation("event", row.id),
+      ...this.recallAnnotation(row.id),
       ...(!summary ? { payload: parse(row.payload) } : {}),
     };
   }
@@ -643,6 +658,9 @@ class AgentMemory {
       updatedAt: item.updatedAt,
       writtenAt: item.writtenAt,
       occurredAt: item.occurredAt,
+      ...(item.recalled
+        ? { recalled: item.recalled, recallNotice: item.recallNotice }
+        : {}),
       conversation: item.conversation,
       senderId: item.senderId,
       senderName: item.senderName,
@@ -845,9 +863,12 @@ class AgentMemory {
           id: r.id,
           conversation: r.conversation,
           at: r.at,
-          text: Array.from(r.body || "")
-            .slice(0, 120)
-            .join(""),
+          ...this.recallAnnotation(r.id),
+          text:
+            (this.recallAnnotation(r.id).recallNotice || "") +
+            Array.from(r.body || "")
+              .slice(0, 120)
+              .join(""),
         });
       byRevision.set(r.revision, group);
     }
@@ -1055,30 +1076,38 @@ class AgentMemory {
       const row = this.delivery(requestId);
       if (!row) throw Error("DELIVERY_NOT_FOUND");
       if (row.status !== "unknown") throw Error("DELIVERY_ALREADY_SETTLED");
-      this.completeDelivery(requestId, resolution, messageId);
       const attempt = this.db
         .prepare(
           "SELECT connection_id,sender_id,body,payload FROM events WHERE agent_id=? AND dedupe=?",
         )
         .get(this.agentId, "send:" + requestId + ":pending");
+      const payload = attempt ? parse(attempt.payload) : {};
+      const action = actionDelivery(payload);
+      // An action has no new QQ message identity, even if an administrator's
+      // reconciliation request happens to include a message ID.
+      const resolvedMessageId = action ? null : messageId;
+      this.completeDelivery(requestId, resolution, resolvedMessageId);
       this.append({
         dedupe: "send:" + requestId + ":reconciled",
         connectionId: attempt?.connection_id || "",
         conversation: row.conversation,
         senderId: attempt?.sender_id ?? null,
-        kind: "message.send-result",
+        kind:
+          action && resolution === "sent"
+            ? "action.confirmed"
+            : "message.send-result",
         direction: "out",
         status: resolution === "sent" ? "confirmed" : "failed",
         body: attempt?.body || "",
         // Inherit the attempt's payload so repository/operations protection
         // follows the copied body, as the delivery's own send-result does.
         payload: {
-          ...(attempt ? parse(attempt.payload) : {}),
+          ...payload,
           requestId,
           reconciledBy: by,
           previousStatus: "unknown",
           resolution,
-          ...(messageId ? { messageId } : {}),
+          ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
         },
       });
       return { requestId, status: resolution };
@@ -1106,10 +1135,13 @@ class AgentMemory {
     const since = new Date(Date.now() - 10 * 60000).toISOString();
     const candidates = this.db
       .prepare(
-        "SELECT d.request_id AS requestId, e.body FROM deliveries d JOIN events e ON e.agent_id=d.agent_id AND e.dedupe='send:' || d.request_id || ':pending' WHERE d.agent_id=? AND d.conversation=? AND d.status='unknown' AND d.created_at>=?",
+        "SELECT d.request_id AS requestId, e.body, e.payload FROM deliveries d JOIN events e ON e.agent_id=d.agent_id AND e.dedupe='send:' || d.request_id || ':pending' WHERE d.agent_id=? AND d.conversation=? AND d.status='unknown' AND d.created_at>=?",
       )
       .all(this.agentId, conversation, since)
-      .filter((row) => squash(row.body) === want);
+      .filter(
+        (row) =>
+          !actionDelivery(parse(row.payload)) && squash(row.body) === want,
+      );
     if (candidates.length !== 1) return null;
     return this.reconcileDelivery(candidates[0].requestId, "sent", {
       by: "gateway-echo",
@@ -1165,6 +1197,10 @@ class AgentMemory {
           `SELECT * FROM ${name} WHERE agent_id=?${name === "events" ? " ORDER BY seq" : name === "moods" ? " ORDER BY rowid" : ""}`,
         )
         .all(this.agentId);
+    tables.person_notes = tables.person_notes.map((row) => ({
+      ...row,
+      value: json(withoutClosenessCache(parse(row.value))),
+    }));
     tables.diary_revisions = this.db
       .prepare(
         "SELECT r.* FROM diary_revisions r JOIN diaries d ON d.id=r.id WHERE d.agent_id=?",

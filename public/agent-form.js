@@ -31,6 +31,8 @@ const AGENT_TOOL_GROUPS = [
       qq_delivery_status: "查看投递结果",
       qq_wait_for_messages: "等待对方继续说完",
       qq_send_poke: "拍一拍",
+      qq_react: "给消息贴表情回应",
+      qq_recall: "撤回自己刚发的消息",
       qq_forward_read: "展开合并转发",
       qq_forward_send: "发送合并转发",
       qq_cross_group_query: "查询已授权的跨群统计",
@@ -273,7 +275,11 @@ const agentForm = {
     const asr = row.voice?.asr || {},
       backend = this.backendOf(row.backendId),
       notices = row.behavior || {},
-      on = (v) => (v ? "开" : "关");
+      on = (v) => (v ? "开" : "关"),
+      elsewhereMinutes =
+        (row.behavior?.elsewhere?.windowMs ?? 21600000) / 60000,
+      ownWordsMinutes =
+        (row.behavior?.elsewhere?.ownLookbackMs ?? 86400000) / 60000;
     const toolCount = row.tools.filter((t) => tools.includes(t)).length;
     return (
       '<div class="form-grid agent-form">' +
@@ -369,7 +375,105 @@ const agentForm = {
             "persona",
             "初始化模板（仅建立首版 self；已有 self 请在专页编辑）",
             row.persona || "",
-          ),
+          ) +
+          '<p class="hint">推荐在模板里写性格与喜好，再加“说话样本”：5–10 句这个角色真实会说的话，体现口头禅、标点习惯、笑的写法和常见长度。样本属于可成长的 Self；此处不会覆盖已建立的 Self。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "发送前口吻提醒",
+          row.behavior?.toneCheck?.mode === "off"
+            ? "已关闭"
+            : "提醒一次后可确认发送",
+        ),
+        select(
+          "toneCheckMode",
+          "口吻检查",
+          row.behavior?.toneCheck?.mode ?? "warn",
+          [
+            ["warn", "提醒"],
+            ["off", "关闭"],
+          ],
+        ) +
+          range(
+            "toneCheckMaxLines",
+            "普通聊天单条行数上限",
+            row.behavior?.toneCheck?.maxLinesCasual ?? 6,
+            { min: 1, max: 100, step: 1, unit: "行" },
+          ) +
+          area(
+            "toneCheckPhrases",
+            "追加提醒短语（每行一个，最多 50 个，每个最多 100 字）",
+            (row.behavior?.toneCheck?.phrases || []).join("\n"),
+          ) +
+          '<p class="hint">默认提醒“希望对你有帮助”“总结一下”等助手套话，以及普通聊天中的过长消息。主人私聊只豁免行数；程序固定文字、合并转发和文件不检查。提醒发生在投递前，模型可改写，或在同一回合用相同请求编号和相同正文确认发送；所有发送权限和限额照常生效。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "贴表情回应",
+          row.behavior?.actions?.react ? "已开启" : "未开启",
+        ),
+        check(
+          "reactEnabled",
+          "允许给消息贴 QQ 表情",
+          row.behavior?.actions?.react,
+        ) +
+          range(
+            "reactMaxPerMinute",
+            "每分钟最多贴表情次数",
+            row.behavior?.actions?.reactMaxPerMinute ?? 3,
+            { min: 1, max: 60, step: 1, unit: "次" },
+          ) +
+          '<p class="hint">默认关闭，还需在“聊天发言”里允许贴表情工具。只作用于当前会话的已知消息，使用标准 QQ 表情；计入总发送限速，不占用或恢复文字回复额度。收到别人给本角色消息贴的表情只记为观察，不触发回复。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "撤回自己消息",
+          row.behavior?.actions?.recall ? "已开启" : "已关闭",
+        ),
+        check(
+          "recallEnabled",
+          "允许撤回自己刚发的消息",
+          row.behavior?.actions?.recall,
+        ) +
+          range(
+            "recallWindowMs",
+            "撤回窗口",
+            row.behavior?.actions?.recallWindowMs ?? 110000,
+            { min: 1000, max: 110000, step: 1000, unit: "毫秒" },
+          ) +
+          range(
+            "recallMaxPerHour",
+            "每小时最多撤回",
+            row.behavior?.actions?.recallMaxPerHour ?? 3,
+            { min: 1, max: 60, step: 1, unit: "次" },
+          ) +
+          '<p class="hint">还需在聊天工具中允许“撤回自己刚发的消息”。只限本角色本会话已确认发送的消息；撤回计入总限速，不恢复文字回复额度。失败或未知结果不自动重试，原文保留并标注撤回。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "别处近况",
+          row.behavior?.elsewhere?.enabled === false
+            ? "已关闭"
+            : `最近 ${elsewhereMinutes} 分钟`,
+        ),
+        check(
+          "elsewhereEnabled",
+          "聊天时附上对方最近在别的聊天里和本角色的直接来往",
+          row.behavior?.elsewhere?.enabled !== false,
+        ) +
+          range("elsewhereWindowMinutes", "回看时间窗口", elsewhereMinutes, {
+            min: 10,
+            max: 1440,
+            step: 10,
+            unit: "分钟",
+          }) +
+          range(
+            "elsewhereOwnLookbackMinutes",
+            "自己在别处说的话最长回看",
+            ownWordsMinutes,
+            { min: 10, max: 1440, step: 10, unit: "分钟" },
+          ) +
+          '<p class="hint">两部分：一是本轮这些人和本角色在别处的直接来往，只给来源、时间、条数和回查入口；二是本角色自己最近在别的群里说过的话，给短摘录、对象（只按 @ 和引用判断）和截断标记，从上次在当前聊天发言之后开始，最长按上面的回看时间。在别人私聊里说的话只给条数，不给原文和对象。不发送消息、不推进已读、不增加回复额度或权限；修改后从下一回合生效，不重建模型会话。</p>',
       ) +
       advanced(
         this.foldTitle(
@@ -1046,6 +1150,62 @@ const agentForm = {
       maxConsecutiveSends: Number(get("maxConsecutiveSends")),
       behavior: {
         ...original.behavior,
+        actions: {
+          ...original.behavior?.actions,
+          react: f.has("reactEnabled"),
+          reactMaxPerMinute: f.has("reactMaxPerMinute")
+            ? Number(get("reactMaxPerMinute"))
+            : (original.behavior?.actions?.reactMaxPerMinute ?? 3),
+          recall: f.has("recallWindowMs")
+            ? f.has("recallEnabled")
+            : original.behavior?.actions?.recall,
+          recallWindowMs: edited(
+            "recallWindowMs",
+            original.behavior?.actions?.recallWindowMs ?? 110000,
+            Number,
+            original.behavior?.actions?.recallWindowMs,
+          ),
+          recallMaxPerHour: edited(
+            "recallMaxPerHour",
+            original.behavior?.actions?.recallMaxPerHour ?? 3,
+            Number,
+            original.behavior?.actions?.recallMaxPerHour,
+          ),
+        },
+        // A form without these fields keeps the stored switch and window.
+        elsewhere: {
+          ...original.behavior?.elsewhere,
+          enabled:
+            !f.has("elsewhereWindowMinutes") ||
+            f.has("elsewhereEnabled") ===
+              (original.behavior?.elsewhere?.enabled ?? true)
+              ? original.behavior?.elsewhere?.enabled
+              : f.has("elsewhereEnabled"),
+          windowMs: edited(
+            "elsewhereWindowMinutes",
+            (original.behavior?.elsewhere?.windowMs ?? 21600000) / 60000,
+            (v) => Math.round(Number(v) * 60000),
+            original.behavior?.elsewhere?.windowMs,
+          ),
+          ownLookbackMs: edited(
+            "elsewhereOwnLookbackMinutes",
+            (original.behavior?.elsewhere?.ownLookbackMs ?? 86400000) / 60000,
+            (v) => Math.round(Number(v) * 60000),
+            original.behavior?.elsewhere?.ownLookbackMs,
+          ),
+        },
+        toneCheck: {
+          ...original.behavior?.toneCheck,
+          mode: f.has("toneCheckMode")
+            ? get("toneCheckMode")
+            : (original.behavior?.toneCheck?.mode ?? "warn"),
+          phrases: f.has("toneCheckPhrases")
+            ? lines("toneCheckPhrases")
+            : (original.behavior?.toneCheck?.phrases ?? []),
+          maxLinesCasual: f.has("toneCheckMaxLines")
+            ? Number(get("toneCheckMaxLines"))
+            : (original.behavior?.toneCheck?.maxLinesCasual ?? 6),
+        },
         failureNotice: {
           ...original.behavior?.failureNotice,
           enabled: f.has("failureNotice"),
