@@ -254,7 +254,7 @@ function renderApps() {
  ${fold(
    "apps-platforms",
    "平台能力与本机登录",
-   '<p class="hint">先在已连接 OpenCLI 的 Chrome 内打开登录网址，完成登录或扫码，再检查状态。检查用的临时页面结束后可能变为空白，不用于等待扫码；小黑盒只检查本机登录信息，可能不打开页面。小红书当前检查创作者后台登录，普通浏览页登录不能据此确认。不要在聊天中发送密码或 Cookie。同一平台账号的推荐可能受两个 AI 的共同浏览影响。</p><div id="app-platforms"><p class="hint">正在读取…</p></div>',
+   '<p class="hint">先在已连接 OpenCLI 的 Chrome 内打开登录网址，完成登录或扫码，再检查状态。检查用的临时页面结束后可能变为空白，不用于等待扫码；小黑盒只检查本机登录信息，可能不打开页面。小红书检查普通浏览页的登录状态，无需登录创作者后台。不要在聊天中发送密码或 Cookie。同一平台账号的推荐可能受两个 AI 的共同浏览影响。</p><div id="app-platforms"><p class="hint">正在读取…</p></div>',
    { summary: '<span id="app-login-summary">正在读取…</span>' },
  )}`;
   $("#app-policy").onsubmit = (e) => {

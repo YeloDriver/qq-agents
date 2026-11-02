@@ -127,3 +127,61 @@ export function bilibiliDynamicRow(fields) {
           : "dynamic-metadata",
   };
 }
+
+export async function xiaohongshuLoginStatus(page) {
+  // Consumer browsing does not require the separate creator-site session.
+  // Keep identity and credentials in the browser; export only the current
+  // webpage login flag.
+  await page.goto("https://www.xiaohongshu.com/explore");
+  await page.wait({ time: 2 });
+  const payload = await page.evaluate(`
+    (() => {
+      if (location.origin !== 'https://www.xiaohongshu.com')
+        return { error: 'APP_UPSTREAM_FAILED' };
+      if (/website-login\\/error|error_code=300017|error_code=300031/.test(location.href))
+        return { error: 'APP_VERIFICATION_REQUIRED' };
+      if (/^\\/login(?:\\/|$)/.test(location.pathname))
+        return { loggedIn: false };
+      const unwrap = value => value && typeof value === 'object'
+        ? value.__v_isRef === true && 'value' in value ? value.value
+          : '_value' in value ? value._value : value
+        : value;
+      const probe = el => el?.__vue_app__?.config?.globalProperties?.$pinia;
+      let pinia = probe(document.querySelector('#app'));
+      if (!pinia) {
+        for (const el of document.querySelectorAll('*')) {
+          pinia = probe(el);
+          if (pinia) break;
+        }
+      }
+      const user = pinia?._s?.get('user') || window.__INITIAL_STATE__?.user;
+      const loggedIn = unwrap(user?.loggedIn);
+      if (loggedIn === false) return { loggedIn: false };
+      const info = unwrap(user?.userInfo);
+      const id = info?.userId || info?.user_id;
+      if (loggedIn === true && typeof id === 'string' && id.trim())
+        return { loggedIn: true };
+      const text = document.body?.innerText || '';
+      if (/安全验证|人机验证|请完成验证|滑动验证/.test(text))
+        return { error: 'APP_VERIFICATION_REQUIRED' };
+      if (/登录后查看|请先登录/.test(text)) return { loggedIn: false };
+      return { error: 'APP_UPSTREAM_FAILED' };
+    })()
+  `);
+  const result =
+    payload &&
+    typeof payload === "object" &&
+    "session" in payload &&
+    "data" in payload
+      ? payload.data
+      : payload;
+  if (result?.error)
+    throw Error(
+      result.error === "APP_VERIFICATION_REQUIRED"
+        ? "APP_VERIFICATION_REQUIRED"
+        : "APP_UPSTREAM_FAILED",
+    );
+  if (typeof result?.loggedIn !== "boolean")
+    throw Error("APP_RESPONSE_INVALID");
+  return { loggedIn: result.loggedIn, status: "checked" };
+}

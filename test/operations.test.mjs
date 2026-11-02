@@ -105,7 +105,12 @@ test("L2 write executes only after independent confirmation and detects concurre
 test("workspace traversal, hidden credentials and symlink escapes are refused", async (t) => {
   const f = setup(t);
   await level(f);
-  fs.symlinkSync(f.root, path.join(f.root, "workspace", "escape"));
+  // A real junction preserves directory-link refusal coverage on Windows.
+  fs.symlinkSync(
+    f.root,
+    path.join(f.root, "workspace", "escape"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
   for (const file of ["../x", ".env", "config.json", "escape/config.json"])
     assert.throws(
       () => f.ops.propose(f.ctx, { type: "write", file, text: "x" }),

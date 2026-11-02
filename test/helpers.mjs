@@ -5,8 +5,21 @@ import { EventEmitter } from "node:events";
 import { ConfigStore, validateConfig } from "../src/core/config.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { Runtime } from "../src/core/runtime.mjs";
+import { localFileSymlinkSkip } from "../scripts/verify.mjs";
 // Captured at load: some tests stub process.platform while their hooks run.
 const windows = process.platform === "win32";
+// Only the explicit local runner may mark a named link scenario unavailable.
+export function fileSymlinkTest(t, fn, name = "file symbolic links") {
+  return t.test(
+    name,
+    {
+      skip: localFileSymlinkSkip({ platform: windows ? "win32" : "other" })
+        ? "Windows EPERM confirmed by verify:local preflight; not exercised locally"
+        : false,
+    },
+    fn,
+  );
+}
 const leftovers = new Set();
 process.once("exit", () => {
   for (const root of leftovers)

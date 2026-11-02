@@ -7,7 +7,7 @@ import { FileStore } from "../src/tools/files.mjs";
 import { FILE_TOOL_NAMES } from "../src/tools/file-tools.mjs";
 import { filesSchema } from "../src/core/policy.mjs";
 import { createServer } from "../src/server.mjs";
-import { temp, config, fixture, context } from "./helpers.mjs";
+import { temp, config, fixture, context, fileSymlinkTest } from "./helpers.mjs";
 
 test("metadata growth is rejected before a healthy file becomes unreadable", (t) => {
   const store = new FileStore(temp(t)),
@@ -241,14 +241,14 @@ test("orphan bytes and metadata overhead count toward capacity while unknown dir
   );
 });
 
-test("repair rejects symlink and hardlink payloads; damage removal leaves external targets untouched", (t) => {
+test("repair rejects symlink and hardlink payloads; damage removal leaves external targets untouched", async (t) => {
   const root = temp(t),
     store = new FileStore(path.join(root, "files")),
     policy = filesSchema.parse({});
   const outside = path.join(root, "outside"),
     bytes = Buffer.from("outside bytes");
   fs.writeFileSync(outside, bytes);
-  for (const type of ["symlink", "hardlink"]) {
+  const rejectPayload = (type) => {
     const agent = "agent-" + type,
       file = store.put(agent, bytes, "test.txt", policy);
     const bin = path.join(store.dir(agent), file.fileId + ".bin");
@@ -262,7 +262,13 @@ test("repair rejects symlink and hardlink payloads; damage removal leaves extern
     );
     store.removeDamaged(agent, file.fileId);
     assert.equal(fs.readFileSync(outside).toString(), bytes.toString());
-  }
+  };
+  rejectPayload("hardlink");
+  await fileSymlinkTest(
+    t,
+    async () => rejectPayload("symlink"),
+    "symlinked payload repair and removal preserve the external target",
+  );
 });
 
 test("metadata permission failures have a safe distinct code and do not hide healthy entries", (t) => {
@@ -344,19 +350,25 @@ test("an interrupted removal remains visible and can finish without lifting the 
   assert.equal(store.list("agent-a").blockedCount, 1);
 });
 
-test("a damaged reimport marker cannot make removed protected content public again", (t) => {
-  const root = temp(t),
-    store = new FileStore(root),
-    policy = filesSchema.parse({});
-  const bytes = Buffer.from("protected tombstone"),
-    file = store.put("agent-a", bytes, "a.txt", policy);
-  const base = path.join(root, "agent-a", file.fileId);
-  fs.writeFileSync(base + ".json", "{partial");
-  store.removeDamaged("agent-a", file.fileId);
-  fs.unlinkSync(base + ".blocked");
-  fs.symlinkSync(path.join(root, "missing"), base + ".blocked");
-  assert.throws(
-    () => store.put("agent-a", bytes, "again.txt", policy),
-    /FILE_REMOVED_PROTECTED/,
+test("a damaged reimport marker cannot make removed protected content public again", async (t) => {
+  await fileSymlinkTest(
+    t,
+    async (scenario) => {
+      const root = temp(scenario),
+        store = new FileStore(root),
+        policy = filesSchema.parse({});
+      const bytes = Buffer.from("protected tombstone"),
+        file = store.put("agent-a", bytes, "a.txt", policy);
+      const base = path.join(root, "agent-a", file.fileId);
+      fs.writeFileSync(base + ".json", "{partial");
+      store.removeDamaged("agent-a", file.fileId);
+      fs.unlinkSync(base + ".blocked");
+      fs.symlinkSync(path.join(root, "missing"), base + ".blocked");
+      assert.throws(
+        () => store.put("agent-a", bytes, "again.txt", policy),
+        /FILE_REMOVED_PROTECTED/,
+      );
+    },
+    "a dangling symlink reimport marker stays protected",
   );
 });

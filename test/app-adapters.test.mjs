@@ -2,9 +2,181 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 import { sign } from "../vendor/heybox/signature.mjs";
 import { heyboxRead, heyboxUrl } from "../src/apps/heybox.mjs";
 import { AppAdapter } from "../src/apps/adapter.mjs";
+import { xiaohongshuLoginStatus } from "../src/apps/normalize.mjs";
+
+function xiaohongshuStatusPage({
+  user,
+  liveUser,
+  text = "",
+  url = "https://www.xiaohongshu.com/explore",
+  envelope = false,
+} = {}) {
+  const calls = [],
+    exports = [];
+  const page = {
+    goto: async (target) => calls.push(["goto", target]),
+    wait: async (options) => calls.push(["wait", options]),
+    getCookies: async () => {
+      throw Error("status must not read credentials");
+    },
+    evaluate: async (source) => {
+      const pinia =
+        liveUser === undefined ? null : { _s: new Map([["user", liveUser]]) };
+      const result = JSON.parse(
+        JSON.stringify(
+          vm.runInNewContext(source, {
+            window: { __INITIAL_STATE__: { user } },
+            location: new URL(url),
+            document: {
+              body: { innerText: text },
+              querySelector: () =>
+                pinia
+                  ? {
+                      __vue_app__: {
+                        config: { globalProperties: { $pinia: pinia } },
+                      },
+                    }
+                  : null,
+              querySelectorAll: () => [],
+            },
+          }),
+        ),
+      );
+      exports.push(result);
+      return envelope ? { session: "fixture-session", data: result } : result;
+    },
+  };
+  return { page, calls, exports };
+}
+
+test("Xiaohongshu login checks read the current consumer login flag without exporting identity", async () => {
+  const fixtures = [
+    {
+      loggedIn: true,
+      userInfo: { userId: "fixture-current-user", nickname: "fixture-name" },
+    },
+    {
+      loggedIn: { _value: true },
+      userInfo: { _value: { user_id: "fixture-current-user" } },
+    },
+    {
+      loggedIn: { __v_isRef: true, value: true },
+      userInfo: { __v_isRef: true, value: { userId: "fixture-current-user" } },
+    },
+  ];
+  for (const [index, user] of fixtures.entries()) {
+    const { page, calls, exports } = xiaohongshuStatusPage({
+      user,
+      envelope: index === 1,
+      text: "推荐笔记提到了请先登录",
+    });
+    assert.deepEqual(await xiaohongshuLoginStatus(page), {
+      loggedIn: true,
+      status: "checked",
+    });
+    assert.deepEqual(calls, [
+      ["goto", "https://www.xiaohongshu.com/explore"],
+      ["wait", { time: 2 }],
+    ]);
+    assert.deepEqual(exports, [{ loggedIn: true }]);
+    assert(!JSON.stringify(exports).includes("fixture-current-user"));
+    assert(!JSON.stringify(exports).includes("fixture-name"));
+  }
+});
+
+test("Xiaohongshu current login state takes priority over verification words in notes", async () => {
+  for (const loggedIn of [true, false]) {
+    for (const text of ["推荐笔记讨论安全验证", "推荐笔记讨论人机验证"]) {
+      const { page, exports } = xiaohongshuStatusPage({
+        liveUser: { loggedIn, userInfo: { userId: "fixture-current-user" } },
+        text,
+      });
+      assert.deepEqual(await xiaohongshuLoginStatus(page), {
+        loggedIn,
+        status: "checked",
+      });
+      assert.deepEqual(exports, [{ loggedIn }]);
+    }
+  }
+});
+
+test("Xiaohongshu login checks distinguish anonymous state and prefer hydrated state", async () => {
+  const fixtures = [
+    {
+      user: { loggedIn: false, userInfo: { userId: "fixture-anonymous-user" } },
+    },
+    { user: { loggedIn: { _value: false }, userInfo: { _value: {} } } },
+    {
+      user: { loggedIn: true, userInfo: { userId: "fixture-stale-user" } },
+      liveUser: { loggedIn: false },
+    },
+    { text: "登录后查看搜索结果" },
+    { url: "https://www.xiaohongshu.com/login" },
+  ];
+  for (const fixture of fixtures) {
+    const { page, exports } = xiaohongshuStatusPage(fixture);
+    assert.deepEqual(await xiaohongshuLoginStatus(page), {
+      loggedIn: false,
+      status: "checked",
+    });
+    assert.deepEqual(exports, [{ loggedIn: false }]);
+  }
+  const { page } = xiaohongshuStatusPage({
+    liveUser: { loggedIn: true, userInfo: { userId: "fixture-current-user" } },
+  });
+  assert.deepEqual(await xiaohongshuLoginStatus(page), {
+    loggedIn: true,
+    status: "checked",
+  });
+});
+
+test("Xiaohongshu login checks distinguish verification walls from upstream failures", async () => {
+  for (const fixture of [
+    { text: "请先登录，完成安全验证" },
+    { text: "人机验证" },
+    {
+      url: "https://www.xiaohongshu.com/website-login/error?error_code=300031",
+      liveUser: {
+        loggedIn: true,
+        userInfo: { userId: "fixture-current-user" },
+      },
+    },
+  ]) {
+    const { page, exports } = xiaohongshuStatusPage(fixture);
+    await assert.rejects(xiaohongshuLoginStatus(page), {
+      message: "APP_VERIFICATION_REQUIRED",
+    });
+    assert.deepEqual(exports, [{ error: "APP_VERIFICATION_REQUIRED" }]);
+  }
+  for (const fixture of [
+    {},
+    { user: { loggedIn: true, userInfo: {} } },
+    {
+      user: { loggedIn: "true", userInfo: { userId: "fixture-current-user" } },
+    },
+    { url: "https://example.org/login" },
+    { url: "https://creator.xiaohongshu.com/new/home" },
+  ]) {
+    const { page, exports } = xiaohongshuStatusPage(fixture);
+    await assert.rejects(xiaohongshuLoginStatus(page), {
+      message: "APP_UPSTREAM_FAILED",
+    });
+    assert.deepEqual(exports, [{ error: "APP_UPSTREAM_FAILED" }]);
+  }
+  await assert.rejects(
+    xiaohongshuLoginStatus({
+      goto: async () => {},
+      wait: async () => {},
+      evaluate: async () => null,
+    }),
+    { message: "APP_RESPONSE_INVALID" },
+  );
+});
+
 test("Heybox signature matches upstream web-client compatibility vectors", () => {
   assert.equal(
     sign(

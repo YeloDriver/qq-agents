@@ -4,6 +4,7 @@ import {
   zhihuSearchRows,
   parseExactJson,
   bilibiliDynamicRow,
+  xiaohongshuLoginStatus,
 } from "./normalize.mjs";
 // Isolated child: fixed read adapters only. Never load model-provided code or commands.
 import { heyboxRead } from "./heybox.mjs";
@@ -116,6 +117,7 @@ async function main() {
       if (job.operation === "screenshot") return screenshotAppPage(page, job);
       if (job.platform === "heybox") return heyboxRead(page, job);
       if (job.operation === "status") {
+        if (job.platform === "xiaohongshu") return xiaohongshuLoginStatus(page);
         if (job.platform === "tieba")
           return {
             loggedIn: null,

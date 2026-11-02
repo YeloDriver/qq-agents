@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { temp } from "./helpers.mjs";
+import { temp, fileSymlinkTest } from "./helpers.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import {
   inspectLegacy,
@@ -437,17 +437,38 @@ test("target SQLite aliases and sidecar links never upgrade or modify an old sou
     old = schema3(source);
   old.close();
   const before = fs.readFileSync(source);
-  const symbolic = path.join(root, "symlink.sqlite");
-  fs.symlinkSync(source, symbolic);
-  await assert.rejects(applyMigration(symbolic, plan()), /TARGET_LINK_REFUSED/);
   const hard = path.join(root, "hardlink.sqlite");
   fs.linkSync(source, hard);
   await assert.rejects(applyMigration(hard, plan()), /TARGET_LINK_REFUSED/);
   const sidecar = path.join(root, "target.sqlite");
-  fs.symlinkSync(source, sidecar + "-wal");
-  await assert.rejects(applyMigration(sidecar, plan()), /TARGET_LINK_REFUSED/);
   assert.deepEqual(fs.readFileSync(source), before);
   assert.equal(fs.existsSync(sidecar), false);
+  await fileSymlinkTest(
+    t,
+    async () => {
+      const symbolic = path.join(root, "symlink.sqlite");
+      fs.symlinkSync(source, symbolic);
+      await assert.rejects(
+        applyMigration(symbolic, plan()),
+        /TARGET_LINK_REFUSED/,
+      );
+      assert.deepEqual(fs.readFileSync(source), before);
+    },
+    "SQLite symlink targets are refused without modifying their source",
+  );
+  await fileSymlinkTest(
+    t,
+    async () => {
+      fs.symlinkSync(source, sidecar + "-wal");
+      await assert.rejects(
+        applyMigration(sidecar, plan()),
+        /TARGET_LINK_REFUSED/,
+      );
+      assert.deepEqual(fs.readFileSync(source), before);
+      assert.equal(fs.existsSync(sidecar), false);
+    },
+    "SQLite sidecar symlinks are refused before creating a target",
+  );
 });
 test("SQLite notes, people, sightings and revision audit preserve owner and evidence through export/restore", (t) => {
   const { source, root, store, opts } = setup(t, []),

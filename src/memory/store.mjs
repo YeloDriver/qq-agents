@@ -134,6 +134,18 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS activity_history(agent_id TEXT NOT NULL,project_id TEXT NOT NULL,revision INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(agent_id,project_id,revision));
       CREATE TABLE IF NOT EXISTS memory_corrections(agent_id TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(agent_id,id));
       CREATE TABLE IF NOT EXISTS projects(agent_id TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(agent_id,id));
+      CREATE TABLE IF NOT EXISTS board_entries(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,post_id TEXT,reply_to TEXT,author_kind TEXT NOT NULL,author_id TEXT NOT NULL,request_id TEXT,title TEXT NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at TEXT NOT NULL,removed_at TEXT,UNIQUE(author_kind,author_id,request_id));
+      CREATE INDEX IF NOT EXISTS board_threads ON board_entries(post_id,seq);
+      CREATE INDEX IF NOT EXISTS board_quota ON board_entries(author_kind,author_id,day);
+      CREATE TABLE IF NOT EXISTS board_reads(agent_id TEXT PRIMARY KEY,seq INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS board_mentions(entry_seq INTEGER NOT NULL,target_kind TEXT NOT NULL,target_id TEXT NOT NULL,PRIMARY KEY(entry_seq,target_kind,target_id));
+      CREATE INDEX IF NOT EXISTS board_mention_targets ON board_mentions(target_kind,target_id,entry_seq);
+      CREATE TABLE IF NOT EXISTS board_pins(post_id TEXT PRIMARY KEY,pinned_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS board_mention_seen(agent_id TEXT NOT NULL,entry_seq INTEGER NOT NULL,PRIMARY KEY(agent_id,entry_seq));
+      CREATE TABLE IF NOT EXISTS board_reactions(entry_seq INTEGER NOT NULL,actor_kind TEXT NOT NULL,actor_id TEXT NOT NULL,emoji TEXT NOT NULL,day TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(entry_seq,actor_kind,actor_id,emoji));
+      CREATE INDEX IF NOT EXISTS board_reaction_quota ON board_reactions(actor_kind,actor_id,day);
+      CREATE TABLE IF NOT EXISTS board_removals(entry_seq INTEGER PRIMARY KEY,by_kind TEXT NOT NULL,by_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS board_post_tags(entry_seq INTEGER PRIMARY KEY,tag TEXT NOT NULL);
       `),
       );
       // agentId|eventId of voice messages whose transcript is still running.
@@ -710,6 +722,10 @@ class AgentMemory {
     current = "",
   ) {
     recallScope(conversation);
+    // Without an anchor the timeline needs a source; an unbound value would
+    // otherwise fail inside SQLite as an unclassified error.
+    if (!aroundId && typeof conversation !== "string")
+      throw Error("INVALID_MEMORY_SCOPE");
     num(limit, 20, 1, 50);
     num(maxChars, 12000, 512, 16000);
     num(afterSeq, 0, 0, Number.MAX_SAFE_INTEGER);

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { fixture, config, context, raw } from "./helpers.mjs";
+import { fixture, config, context, raw, fileSymlinkTest } from "./helpers.mjs";
 import { TOOL_NAMES } from "../src/tools/index.mjs";
 import { VoiceStore } from "../src/tools/voice.mjs";
 import { MediaStore } from "../src/tools/media.mjs";
@@ -480,14 +480,11 @@ test("received local voice is confined to administrator media roots and retains 
   assert.equal(imported.sources[0].eventId, eventId);
   const outside = path.join(f.root, "outside.wav");
   fs.writeFileSync(outside, wav());
-  fs.symlinkSync(outside, path.join(dir, "escape.wav"));
-  for (const candidate of [outside, path.join(dir, "escape.wav")]) {
-    const id = event(f, [{ type: "record", data: { url: candidate } }]);
-    await assert.rejects(
-      f.runtime.callTool(ctx, "qq_voice_read", { eventId: id }),
-      /VOICE_LOCAL_PATH_DENIED/,
-    );
-  }
+  const outsideId = event(f, [{ type: "record", data: { url: outside } }]);
+  await assert.rejects(
+    f.runtime.callTool(ctx, "qq_voice_read", { eventId: outsideId }),
+    /VOICE_LOCAL_PATH_DENIED/,
+  );
   fs.writeFileSync(
     path.join(dir, "large.wav"),
     Buffer.alloc(a.voice.maxBytes + 1),
@@ -498,6 +495,19 @@ test("received local voice is confined to administrator media roots and retains 
   await assert.rejects(
     f.runtime.callTool(ctx, "qq_voice_read", { eventId: large }),
     /AUDIO_TOO_LARGE/,
+  );
+  await fileSymlinkTest(
+    t,
+    async () => {
+      const escape = path.join(dir, "escape.wav");
+      fs.symlinkSync(outside, escape);
+      const id = event(f, [{ type: "record", data: { url: escape } }]);
+      await assert.rejects(
+        f.runtime.callTool(ctx, "qq_voice_read", { eventId: id }),
+        /VOICE_LOCAL_PATH_DENIED/,
+      );
+    },
+    "symlinked received voice paths are refused",
   );
 });
 

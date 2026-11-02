@@ -1,6 +1,6 @@
 {
   "name": "qq-agents",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -38,7 +38,8 @@
     "dsh:bundle": "node scripts/dsh-bundle.mjs",
     "format:check": "prettier --check src public scripts test docs examples README.md NOTICE.md package.json eslint.config.mjs tsconfig.json .github",
     "format": "prettier --write src public scripts test docs examples README.md NOTICE.md package.json eslint.config.mjs tsconfig.json .github",
-    "verify": "npm run check && npm run lint && npm run typecheck && npm run defaults:check && npm test && npm run format:check && npm run privacy-scan",
+    "verify": "node scripts/verify.mjs",
+    "verify:local": "node scripts/verify.mjs --local",
     "acceptance:live": "node scripts/local-acceptance.mjs",
     "memory:benchmark": "node scripts/memory-benchmark.mjs",
     "memory:backup": "node scripts/backup.mjs",

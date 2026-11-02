@@ -10,6 +10,7 @@ import { safeToolFailure } from "../src/tools/errors.mjs";
 import { colorGrid } from "../scripts/fixtures/antigravity-media.mjs";
 import { MediaStore } from "../src/tools/media.mjs";
 import { gif } from "./gif-fixture.mjs";
+import { fileSymlinkTest } from "./helpers.mjs";
 const image = (colors) => ({
   type: "image",
   mimeType: "image/png",
@@ -53,7 +54,7 @@ test("Antigravity registers exact pixels in order and retains partial-frame meta
   assert.throws(() => media.result(fixture()), /ANTIGRAVITY_TURN_INACTIVE/);
 });
 
-test("native image grants cannot read other paths, modified pixels, symlinks or old turns", (t) => {
+test("native image grants cannot read other paths, modified pixels, symlinks or old turns", async (t) => {
   const media = new AntigravityMedia(),
     next = new AntigravityMedia();
   t.after(() => {
@@ -81,9 +82,15 @@ test("native image grants cannot read other paths, modified pixels, symlinks or 
   data[data.length - 1] ^= 1;
   fs.writeFileSync(f.path, data);
   assert.equal(antigravityToolAllowed(call(f.path), [], files), false);
-  fs.rmSync(f.path);
-  fs.symlinkSync(next.catalog()[0].path, f.path, "file");
-  assert.equal(antigravityToolAllowed(call(f.path), [], files), false);
+  await fileSymlinkTest(
+    t,
+    async () => {
+      fs.rmSync(f.path);
+      fs.symlinkSync(next.catalog()[0].path, f.path, "file");
+      assert.equal(antigravityToolAllowed(call(f.path), [], files), false);
+    },
+    "symlinked image pixels are refused",
+  );
 });
 
 test("image registration fails atomically for unsupported, animated or excessive results", (t) => {

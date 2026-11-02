@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
 import { CodexBackend } from "../src/backends/codex.mjs";
 import { MediaStore } from "../src/tools/media.mjs";
 import { GeneratedImages } from "../src/core/generated-images.mjs";
-import { config, fixture, context } from "./helpers.mjs";
+import { config, fixture, context, fileSymlinkTest } from "./helpers.mjs";
 
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
@@ -162,25 +162,40 @@ test("native image recovery reuses durable registered media after a lost notific
   assert.equal(f.runtime.transports.get("qq-0").sent.length, 0);
 });
 test("native generation cannot import arbitrary files, symlinks or hardlinks", async (t) => {
-  const f = await setup(t);
-  const outside = path.join(f.root, "private.png");
-  fs.writeFileSync(outside, png);
-  f.rpc.image({ ...f.item, id: "outside", savedPath: outside });
-  fs.unlinkSync(f.file);
-  fs.symlinkSync(outside, f.file);
-  f.rpc.image({ ...f.item, id: "symlink" });
-  await tick();
-  fs.unlinkSync(f.file);
-  fs.linkSync(outside, f.file);
-  f.rpc.image({ ...f.item, id: "hardlink" });
-  await tick();
-  const result = f.runtime.generatedImages.list(f.ctx, {});
-  assert.equal(result.items.length, 3);
-  assert(
-    result.items.every((x) => x.status === "registration-failed" && !x.mediaId),
+  // Separate fixtures keep each refusal and its durable failure count independent.
+  const refused = async (scenario, type) => {
+    const f = await setup(scenario),
+      outside = path.join(f.root, "private.png");
+    fs.writeFileSync(outside, png);
+    if (type !== "outside") {
+      fs.unlinkSync(f.file);
+      if (type === "symlink") fs.symlinkSync(outside, f.file);
+      else fs.linkSync(outside, f.file);
+    }
+    f.rpc.image({
+      ...f.item,
+      id: type,
+      savedPath: type === "outside" ? outside : f.file,
+    });
+    await tick();
+    const result = f.runtime.generatedImages.list(f.ctx, {});
+    assert.equal(result.items.length, 1);
+    assert.equal(result.items[0].status, "registration-failed");
+    assert.equal(result.items[0].mediaId, undefined);
+    assert(!JSON.stringify(result).includes(outside));
+    assert.equal(f.runtime.transports.get("qq-0").sent.length, 0);
+  };
+  await t.test("arbitrary native image paths are refused", async (scenario) => {
+    await refused(scenario, "outside");
+  });
+  await t.test("hardlinked native images are refused", async (scenario) => {
+    await refused(scenario, "hardlink");
+  });
+  await fileSymlinkTest(
+    t,
+    async (scenario) => refused(scenario, "symlink"),
+    "symlinked native images are refused",
   );
-  assert(!JSON.stringify(result).includes(outside));
-  assert.equal(f.runtime.transports.get("qq-0").sent.length, 0);
 });
 test("failed or cancelled generation cannot mint media and known native quota failures stay distinct", async (t) => {
   const f = await setup(t);

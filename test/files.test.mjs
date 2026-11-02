@@ -11,7 +11,7 @@ import { filesSchema } from "../src/core/policy.mjs";
 import { OneBot, normalizeEvent } from "../src/transport/onebot.mjs";
 import { createServer } from "../src/server.mjs";
 import { ConfigStore } from "../src/core/config.mjs";
-import { config, fixture, temp, raw } from "./helpers.mjs";
+import { config, fixture, temp, raw, fileSymlinkTest } from "./helpers.mjs";
 
 test("local directory grants cannot import another agent's library", (t) => {
   const root = temp(t),
@@ -185,17 +185,13 @@ test("independent persistent libraries, quota/dedup, filename and byte integrity
   );
 });
 
-test("local imports allow dedicated roots, reject traversal, symlinks, hardlinks and credentials", (t) => {
+test("local imports allow dedicated roots, reject traversal, symlinks, hardlinks and credentials", async (t) => {
   const root = temp(t),
     exports = path.join(root, "exports"),
     store = new FileStore(path.join(root, "library"));
   fs.mkdirSync(exports);
   fs.writeFileSync(path.join(exports, "report.txt"), "report");
   fs.writeFileSync(path.join(root, "outside.txt"), "outside");
-  fs.symlinkSync(
-    path.join(root, "outside.txt"),
-    path.join(exports, "link.txt"),
-  );
   fs.linkSync(path.join(root, "outside.txt"), path.join(exports, "hard.txt"));
   fs.writeFileSync(path.join(exports, "credentials.json"), "private");
   const policy = filesSchema.parse({ localRoots: [exports] });
@@ -206,7 +202,6 @@ test("local imports allow dedicated roots, reject traversal, symlinks, hardlinks
   for (const file of [
     "../outside.txt",
     path.join(root, "outside.txt"),
-    "link.txt",
     "hard.txt",
     "credentials.json",
     ".env",
@@ -218,6 +213,20 @@ test("local imports allow dedicated roots, reject traversal, symlinks, hardlinks
   assert.throws(
     () => store.import("agent-a", 1, "report.txt", policy),
     /PATH_DENIED/,
+  );
+  await fileSymlinkTest(
+    t,
+    async () => {
+      fs.symlinkSync(
+        path.join(root, "outside.txt"),
+        path.join(exports, "link.txt"),
+      );
+      assert.throws(
+        () => store.import("agent-a", 0, "link.txt", policy),
+        /PATH_DENIED/,
+      );
+    },
+    "symlinked local file imports are refused",
   );
 });
 
