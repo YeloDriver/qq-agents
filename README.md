@@ -231,6 +231,7 @@ node src/main.mjs --data /path/to/private-data --port 3210
 - [架构与身份边界](docs/ARCHITECTURE.md)
 - [场景记忆、来源与自主表达](docs/MEMORY-DESIGN.md)
 - [Prompt 与 Self 的职责](docs/PROMPT-CONTRACTS.md)
+- [QQ 回复漏投递自动纠偏方案](docs/plans/QQ-REPLY-CORRECTION.md)（设计阶段，尚未实现）
 - [审批标识与子进程凭据边界](docs/CREDENTIAL-BOUNDARIES.md)
 - [基线与功能对照](docs/FEATURE-MATRIX.md)
 - [拟人化改进设计与实现记录：节奏、口吻、作息与关系](docs/plans/2026-11-01-humanlike.md)（含七项实现 PR 与单独验收边界）

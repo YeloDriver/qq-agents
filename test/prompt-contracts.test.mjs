@@ -6,7 +6,7 @@ import { toolSpecs } from "../src/tools/index.mjs";
 import { mcpEntrySpecs, scopedCatalog } from "../src/tools/catalog.mjs";
 import { identityAnchors, stableInstructions } from "../src/core/prompts.mjs";
 
-test("QQ chat style reaches both chat scopes without replacing tool or subject protocols", async (t) => {
+test("QQ delivery and style rules reach both chat scopes without worked examples or subject send instructions", async (t) => {
   for (const type of ["codex", "dsh"]) {
     const cfg = config(1),
       captured = [];
@@ -28,11 +28,20 @@ test("QQ chat style reaches both chat scopes without replacing tool or subject p
       assert.match(p.instructions, /不机械添加助词/);
       assert.match(p.instructions, /仍可只说“嗯”“晚安”/);
       assert.match(p.instructions, /疑问和感叹正常使用问号、感叹号/);
-      assert.equal(
-        p.instructions
-          .split("\n")
-          .filter((line) => /^对方.*；过度精简/.test(line)).length,
-        4,
+      assert.doesNotMatch(
+        p.instructions,
+        /自然口语\/过度精简正误对照|以下占位情境|对方.*；过度精简/,
+      );
+      assert.match(p.instructions, /【QQ 投递协议】决定在当前 QQ 聊天回复时/);
+      assert.match(
+        p.instructions,
+        /本回合已启用的 qq_send 或 qq_send_burst 投递正文/,
+      );
+      assert.match(p.instructions, /自然表达规则用于工具参数中的正文/);
+      assert.match(p.instructions, /仍可选择不回复/);
+      assert(
+        p.instructions.indexOf("【QQ 投递协议】") <
+          p.instructions.indexOf("当前 self v"),
       );
       assert.match(
         p.instructions,
@@ -51,7 +60,7 @@ test("QQ chat style reaches both chat scopes without replacing tool or subject p
       } else assert.match(p.instructions, /参数以 schema 为准/);
     }
     const subject = captured[2];
-    assert.doesNotMatch(subject.instructions, /客观自然准则|过度精简正误对照/);
+    assert.doesNotMatch(subject.instructions, /客观自然准则|QQ 投递协议/);
     assert.match(subject.instructions, /subject_log/);
     assert(!subject.tools.some((tool) => tool.name === "qq_send"));
   }
@@ -72,7 +81,7 @@ test("QQ style is absent from protected work and other internal instruction scop
     const contract = runtime.contexts.instructionContract(a, scope, self, [
       "framework_read",
     ]);
-    assert.doesNotMatch(contract.instructions, /客观自然准则|过度精简正误对照/);
+    assert.doesNotMatch(contract.instructions, /客观自然准则|QQ 投递协议/);
     assert.match(contract.instructions, /deployment_info、diagnostics_read/);
     assert.match(contract.instructions, /参数以 schema 为准/);
   }
@@ -123,6 +132,53 @@ test("a chat with the previous style-free instruction digest rebuilds before ado
   assert.equal(captured[1].session, null);
   assert.match(captured[1].instructions, /客观自然准则/);
   assert.equal(memory.identity.current().version, self.version);
+  const history = memory.identity.list("session_history");
+  assert.equal(history.length, 1);
+  assert.equal(history[0].reason, "identity-or-protocol-change");
+});
+
+test("chat delivery rules replace the previous worked examples with one safe session retirement", async (t) => {
+  const cfg = config(1),
+    captured = [];
+  cfg.agents[0].contextPolicy.capacityTokens = 65536;
+  const { runtime, store } = fixture(t, {
+    cfg,
+    run: async (p) => {
+      captured.push(p);
+      p.saveSession({ id: `delivery-${captured.length}`, backend: "fixture" });
+    },
+  });
+  const scope = "private:30000",
+    memory = store.bind("agent-0");
+  await runtime.wake("agent-0", scope);
+  const originalSelf = memory.identity.current(),
+    previousStyle = [
+      "【自然口语/过度精简正误对照】",
+      "日常口语保留自然的主谓和必要衔接，把话说完整，不压成电报式片段，也不机械添加助词。该短时仍可只说“嗯”“晚安”；短消息末尾没有必要就不加句号，疑问和感叹正常使用问号、感叹号。以下占位情境只演示完整自然的表达，不是固定话术，也不要求每次加长回复：",
+      "对方说明天降温：自然“那明天出门多穿点，别冻着了”；过度精简“降温，多穿”",
+      "对方下雨时没带伞：自然“那你先找个地方躲一下，等雨小了再走”；过度精简“找地躲雨，雨小再走”",
+      "对方说忙完了：自然“忙完了？那现在能歇会儿了”；过度精简“忙完？可歇”",
+      "对方说面煮得太软：自然“下次早点捞出来试试，应该会好一点”；过度精简“煮软，下次早捞”",
+    ].join("\n"),
+    previous = captured[0].instructions
+      .replace(/【QQ 投递协议】[^\n]+\n\n/, "")
+      .replace(/日常口语保留[^\n]+/, previousStyle),
+    previousHash = createHash("sha256").update(previous).digest("hex");
+  assert.doesNotMatch(previous, /QQ 投递协议/);
+  assert.match(previous, /自然口语\/过度精简正误对照/);
+  memory.setState(scope, {
+    ...memory.state(scope),
+    loadedInstructionsHash: previousHash,
+  });
+  runtime.contexts.upgradeInstructions(runtime.agent("agent-0"), originalSelf);
+  assert.equal(memory.state(scope).loadedInstructionsHash, previousHash);
+  await runtime.wake("agent-0", scope);
+  assert.equal(captured[1].session, null);
+  assert.match(captured[1].instructions, /QQ 投递协议/);
+  assert.doesNotMatch(captured[1].instructions, /正误对照|对方.*；过度精简/);
+  await runtime.wake("agent-0", scope);
+  assert.equal(captured[2].session.id, "delivery-2");
+  assert.deepEqual(memory.identity.current(), originalSelf);
   const history = memory.identity.list("session_history");
   assert.equal(history.length, 1);
   assert.equal(history[0].reason, "identity-or-protocol-change");
