@@ -18,12 +18,18 @@ const png = Buffer.concat([
 ]);
 
 function setup(t, run = async () => {}, edit = () => {}, options = {}) {
+  const { realClock = false, ...hostOptions } = options;
   const cfg = config(1);
   cfg.games.enabled = true;
   cfg.agents[0].games.enabled = true;
   edit(cfg);
   const f = fixture(t, { cfg, run });
-  f.runtime.games = new GameHost(f.runtime, { launch: false, ...options });
+  // In-process tests have no renewal ticker; real children share the wall clock.
+  if (!realClock) {
+    const now = f.runtime.now();
+    f.runtime.now = () => now;
+  }
+  f.runtime.games = new GameHost(f.runtime, { launch: false, ...hostOptions });
   const h = f.runtime.games;
   h.ensure();
   return { ...f, h, k: h.kernel };
@@ -91,6 +97,16 @@ test("remarks are flattened, bounded and drop links or markup", () => {
     "\n\t",
   ])
     assert.equal(cleanRemark(text), "");
+});
+
+test("persona fixture keeps room access across wall-clock delays", async (t) => {
+  const f = setup(t),
+    { roomId } = await create(f),
+    room = f.k.store.room(roomId),
+    accessUntil = f.h.source(roomId).accessUntil;
+  t.mock.method(f.runtime, "clock", () => new Date(accessUntil + 1));
+  assert.doesNotThrow(() => f.k.access(room, f.k.actor(room.owner)));
+  assert.ok(f.runtime.now() < accessUntil);
 });
 
 test("AI remark commits with the move without an extra revision; humans cannot remark", async (t) => {
@@ -333,7 +349,7 @@ test("the host caches avatars, retries failures hourly and only fetches for live
 });
 
 test("the game child serves a pushed avatar by hash with an image-only CSP allowance", async (t) => {
-  const f = setup(t);
+  const f = setup(t, undefined, undefined, { realClock: true });
   await f.h.close();
   const probe = http.createServer();
   await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
