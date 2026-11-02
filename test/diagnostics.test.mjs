@@ -1,9 +1,81 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import { fixture } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { Diagnostics, classifyError } from "../src/core/diagnostics.mjs";
+import { appService } from "../src/apps/tools.mjs";
+
+test("platform login checks retain safe errors through the admin API and diagnostics", async (t) => {
+  const f = fixture(t);
+  const service = appService(f.runtime);
+  service.adapter.lockOptions = {
+    lockPath: path.join(f.root, "browser.lock"),
+    cooldownMs: 0,
+  };
+  let failure;
+  t.mock.method(service.adapter, "run", async () => {
+    throw failure;
+  });
+  const app = createServer({ runtime: f.runtime, token: "synthetic-admin" });
+  const port = await app.listen();
+  t.after(() => app.close());
+  for (const [code, status] of [
+    ["APP_LOGIN_REQUIRED", 400],
+    ["APP_VERIFICATION_REQUIRED", 400],
+    ["APP_RATE_LIMITED", 429],
+    ["APP_TIMEOUT", 503],
+  ]) {
+    failure = Error(code, { cause: Error("SYNTHETIC_PRIVATE_PLATFORM_TEXT") });
+    const response = await fetch(`http://127.0.0.1:${port}/api/apps/probe`, {
+      method: "POST",
+      headers: {
+        "x-admin-token": "synthetic-admin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "agent-0", platform: "xiaohongshu" }),
+    });
+    assert.equal(response.status, status, code);
+    const body = await response.json();
+    assert.equal(body.error, code);
+    assert.equal(body.retryable, [429, 503].includes(status));
+    assert.equal(response.headers.get("x-request-id"), body.requestId);
+    assert.match(body.requestId, /^[a-f0-9-]{36}$/);
+    const recent = f.runtime.status().recentErrors;
+    assert.equal(recent[0].code, code);
+    assert.equal(
+      service.adapter.capabilities().find((p) => p.platform === "xiaohongshu")
+        .lastProbe.status,
+      code,
+    );
+    assert.doesNotMatch(
+      JSON.stringify([body, recent]),
+      /SYNTHETIC_PRIVATE_PLATFORM_TEXT/,
+    );
+  }
+});
+
+test("app read and cancellation diagnostics retain reviewed codes and reject unknown errors", () => {
+  for (const [code, status, retryable] of [
+    ["APP_SEARCH_UNAVAILABLE", 503, true],
+    ["APP_READ_FAILED", 500, false],
+    ["APP_CANCELLED", 400, false],
+  ]) {
+    const result = classifyError(Error(code));
+    assert.equal(result.code, code);
+    assert.equal(result.status, status);
+    assert.equal(result.retryable, retryable);
+  }
+  assert.equal(
+    classifyError(Error("APP_UNREVIEWED_SYNTHETIC")).code,
+    "INTERNAL_ERROR",
+  );
+  assert.equal(
+    classifyError(Error("APP_LOGIN_REQUIRED: private provider text")).code,
+    "INTERNAL_ERROR",
+  );
+});
 
 test("image download diagnostics preserve safe specific causes instead of INTERNAL_ERROR", () => {
   for (const code of [
