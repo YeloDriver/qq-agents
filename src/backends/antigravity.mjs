@@ -512,9 +512,19 @@ export class AntigravityBackend {
     this.active.add(entry);
     params.signal.addEventListener("abort", abort, { once: true });
     try {
-      const hook = [process.execPath, path.join(here, "antigravity-guard.mjs")]
+      let hook = [process.execPath, path.join(here, "antigravity-guard.mjs")]
         .map((v) => antigravityShellQuote(v))
         .join(" ");
+      if (process.platform === "win32") {
+        // The CLI escapes quoted hook commands before invoking cmd.exe. A
+        // relative batch name avoids that extra quoting while keeping paths
+        // with spaces inside the bridge-owned script and preserving stdin.
+        managedFile(
+          path.join(workspace, "qq-agents-hook.cmd"),
+          `@echo off\r\nchcp 65001 >nul\r\n${hook}\r\nexit /b %errorlevel%\r\n`,
+        );
+        hook = "qq-agents-hook.cmd";
+      }
       managedFile(
         path.join(custom, "hooks.json"),
         JSON.stringify({

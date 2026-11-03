@@ -32,8 +32,7 @@ const tool = {
   description: "Synthetic test",
   inputSchema: { type: "object", properties: {} },
 };
-function setup(t, mode = "success") {
-  const root = temp(t);
+function setup(t, mode = "success", root = temp(t)) {
   const cfg = config();
   const backendConfig = validateConfig({
     ...cfg,
@@ -294,6 +293,104 @@ test("Antigravity hook quoting handles Unix apostrophes and rejects Windows expa
     /ANTIGRAVITY_COMMAND_UNSAFE/,
   );
 });
+
+test(
+  "Antigravity Windows hook uses a relative batch path and forwards stdin under paths with spaces",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const temporary = temp(t);
+    const root = path.join(temporary, "Windows hook path with spaces");
+    const { backend, params, launches } = setup(t, "success", root);
+    let releaseTool;
+    const toolGate = new Promise((resolve) => {
+      releaseTool = resolve;
+    });
+    let enteredTool;
+    const toolEntered = new Promise((resolve) => {
+      enteredTool = resolve;
+    });
+    const run = backend.run({
+      ...params,
+      callTool: async (name, args) => {
+        enteredTool({ name, args });
+        await toolGate;
+        return { ok: true };
+      },
+    });
+    const runResult = run.then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error }),
+    );
+
+    try {
+      const called = await Promise.race([
+        toolEntered,
+        runResult.then((result) => {
+          if (!result.ok) throw result.error;
+          throw Error("Fixture completed before the held tool call");
+        }),
+      ]);
+      assert.equal(called.name, "probe");
+      assert.match(launches[0].options.cwd, / /);
+
+      const workspace = launches[0].options.cwd;
+      const hooksFile = path.join(workspace, ".agents", "hooks.json");
+      const hooks = JSON.parse(fs.readFileSync(hooksFile, "utf8"));
+      const command = hooks["qq-agents"].PreToolUse[0].hooks[0].command;
+      assert.equal(command, "qq-agents-hook.cmd");
+      assert.equal(command.includes('"'), false);
+
+      const batchFile = path.join(workspace, command);
+      const batch = fs.readFileSync(batchFile, "utf8");
+      const guard = fileURLToPath(
+        new URL("../src/backends/antigravity-guard.mjs", import.meta.url),
+      );
+      assert.ok(batch.startsWith("@echo off\r\nchcp 65001 >nul\r\n"));
+      assert.ok(batch.includes(`"${process.execPath}" "${guard}"\r\n`));
+      assert.ok(batch.endsWith("\r\nexit /b %errorlevel%\r\n"));
+
+      async function invoke(input) {
+        const child = spawn("cmd.exe", ["/d", "/c", command], {
+          cwd: workspace,
+          env: launches[0].options.env,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        });
+        let output = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => {
+          output += chunk;
+        });
+        const closed = new Promise((resolve, reject) => {
+          child.once("error", reject);
+          child.once("close", (code) => resolve(code));
+        });
+        child.stdin.end(JSON.stringify(input));
+        assert.equal(await closed, 0);
+        return JSON.parse(output);
+      }
+
+      assert.deepEqual(
+        await invoke({
+          toolCall: {
+            name: "call_mcp_tool",
+            args: { ServerName: "qq-agents", ToolName: "probe" },
+          },
+        }),
+        { decision: "auto_approve", reason: "QQ_AGENTS_TOOL_ALLOWED" },
+      );
+      assert.deepEqual(
+        await invoke({ toolCall: { name: "run_command", args: {} } }),
+        { decision: "deny", reason: "QQ_AGENTS_TOOL_DENIED" },
+      );
+    } finally {
+      releaseTool();
+    }
+
+    const result = await runResult;
+    assert.equal(result.ok, true, result.ok ? "" : result.error.message);
+  },
+);
 
 for (const mode of ["malformed", "wrong-result", "duplicate-result", "quota"])
   test(`Antigravity retires ${mode} sessions without replay`, async (t) => {
