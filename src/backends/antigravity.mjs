@@ -607,6 +607,14 @@ export class AntigravityBackend {
       );
       if (params.signal.aborted || cancelled || this.closing)
         throw Error("ABORTED");
+      const childEnv = isolatedEnv();
+      if (process.platform === "win32") {
+        // The CLI may execute hooks outside the chat workspace. Resolve only
+        // this bridge-owned batch entry through the turn's child environment.
+        childEnv.PATH = [workspace, childEnv.PATH]
+          .filter(Boolean)
+          .join(path.delimiter);
+      }
       child = this.spawn(
         this.config.command || "agy",
         [
@@ -627,7 +635,7 @@ export class AntigravityBackend {
         {
           cwd: workspace,
           env: {
-            ...isolatedEnv(),
+            ...childEnv,
             QQ_AGY_ENDPOINT: endpoint,
             QQ_AGY_TOKEN: token,
           },

@@ -295,7 +295,7 @@ test("Antigravity hook quoting handles Unix apostrophes and rejects Windows expa
 });
 
 test(
-  "Antigravity Windows hook uses a relative batch path and forwards stdin under paths with spaces",
+  "Antigravity Windows hook resolves its relative batch through CLI PATH outside the workspace",
   { skip: process.platform !== "win32" },
   async (t) => {
     const temporary = temp(t);
@@ -349,26 +349,67 @@ test(
       assert.ok(batch.includes(`"${process.execPath}" "${guard}"\r\n`));
       assert.ok(batch.endsWith("\r\nexit /b %errorlevel%\r\n"));
 
-      async function invoke(input) {
+      const launchEnv = launches[0].options.env;
+      const launchPath = launchEnv.PATH;
+      assert.equal(typeof launchPath, "string");
+      const pathEntries = launchPath.split(path.delimiter);
+      assert.equal(
+        path.resolve(pathEntries[0]).toLowerCase(),
+        path.resolve(workspace).toLowerCase(),
+      );
+      const outside = path.join(temporary, "outside cli working directory");
+      fs.mkdirSync(outside, { recursive: true });
+
+      async function invoke(input, env = launchEnv) {
         const child = spawn("cmd.exe", ["/d", "/c", command], {
-          cwd: workspace,
-          env: launches[0].options.env,
+          cwd: outside,
+          env,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
         });
-        let output = "";
+        let output = "",
+          diagnostic = "";
         child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
         child.stdout.on("data", (chunk) => {
           output += chunk;
         });
+        child.stderr.on("data", (chunk) => {
+          diagnostic += chunk;
+        });
         const closed = new Promise((resolve, reject) => {
           child.once("error", reject);
-          child.once("close", (code) => resolve(code));
+          child.once("close", (code) => resolve({ code, diagnostic }));
         });
         child.stdin.end(JSON.stringify(input));
-        assert.equal(await closed, 0);
+        const { code, diagnostic: stderr } = await closed;
+        assert.equal(code, 0, stderr);
         return JSON.parse(output);
       }
+
+      const legacyPath = pathEntries
+        .slice(1)
+        .filter(
+          (entry) =>
+            path.resolve(entry).toLowerCase() !==
+            path.resolve(workspace).toLowerCase(),
+        )
+        .join(path.delimiter);
+      const legacyCode = await new Promise((resolve, reject) => {
+        const child = spawn("cmd.exe", ["/d", "/c", command], {
+          cwd: outside,
+          env: { ...launchEnv, PATH: legacyPath },
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+      assert.notEqual(
+        legacyCode,
+        0,
+        "legacy PATH must not find the workspace hook",
+      );
 
       assert.deepEqual(
         await invoke({
