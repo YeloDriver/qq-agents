@@ -713,13 +713,30 @@ test("rejects duplicate and invalid terminal frames, missing DONE, and stale res
   );
   assert.equal(wrong.launches.length, 1);
 
-  const malformedTail = setup(t);
-  const malformedTailChat = malformedTail.chat("private:malformed-tail");
-  await assert.rejects(
-    malformedTailChat.run("malformed-tail"),
-    /ANTIGRAVITY_PROTOCOL_ERROR/,
-  );
-  assert.equal(malformedTail.launches.length, 1);
+  for (const split of [false, true]) {
+    const malformedTail = setup(t, { fakeWorkers: true });
+    const malformedTailChat = malformedTail.chat("private:malformed-tail");
+    const submitted = deferred();
+    const run = malformedTailChat.run("success", {
+      onInputSubmitted: () => submitted.resolve(),
+    });
+    const rejected = assert.rejects(run, /ANTIGRAVITY_PROTOCOL_ERROR/);
+    await submitted.promise;
+    const child = malformedTail.syntheticWorkers[0];
+    const frames = successfulFrames("00000000-0000-4000-8000-000000000104");
+    const terminalChunk =
+      frames.map((frame) => JSON.stringify(frame)).join("\n") + "\n";
+    // Pipe writes do not define stdout chunk boundaries. Inject both chunk
+    // shapes before settlement instead of racing the native fixture's logger.
+    if (split) {
+      child.stdout.write(terminalChunk);
+      child.stdout.write("{malformed synthetic tail");
+    } else child.stdout.write(terminalChunk + "{malformed synthetic tail");
+    await rejected;
+    assert.equal(malformedTailChat.state.session, null);
+    assert.equal(malformedTail.backend.workers.size, 0);
+    assert.equal(malformedTail.launches.length, 1);
+  }
 
   const missing = setup(t);
   const missingChat = missing.chat("private:no-response");
@@ -1159,4 +1176,88 @@ test("reused worker media cleanup failures preserve terminal outcomes and retire
       "Antigravity turn media cleanup failed",
     ]),
   );
+});
+
+test("isolates a late malformed stdout tail from a saved idle session", async (t) => {
+  const fixture = setup(t, { fakeWorkers: true });
+  const conversation = fixture.chat("private:late-idle-malformed-tail");
+  const diagnostics = [];
+  const firstSubmitted = deferred();
+  const firstRun = conversation.run("success", {
+    onInputSubmitted: () => firstSubmitted.resolve(),
+    onDiagnostic: (event) => diagnostics.push(event),
+  });
+  await Promise.race([
+    firstSubmitted.promise,
+    firstRun.then(() => {
+      throw Error("First fake turn completed before input submission");
+    }),
+  ]);
+
+  const firstWorker = fixture.syntheticWorkers[0];
+  assert(firstWorker);
+  assert.equal(firstWorker.inputs.length, 1);
+  const nativeId = "00000000-0000-4000-8000-000000000105";
+  firstWorker.emitFrames(...successfulFrames(nativeId));
+  await firstRun;
+
+  const idleWorker = [...fixture.backend.workers.values()][0];
+  assert(idleWorker);
+  const session = conversation.state.session;
+  assert(session);
+  assert.equal(session.id, nativeId);
+  const nativeDirectory = path.join(
+    fixture.backend.profile,
+    "cli",
+    "conversations",
+  );
+  fs.mkdirSync(nativeDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(nativeDirectory, `${nativeId}.db`),
+    "synthetic native conversation database\n",
+  );
+  const binding = idleWorker.details.binding;
+  const bindingBefore = fs.readFileSync(binding, "utf8");
+  assert.equal(JSON.parse(bindingBefore).id, nativeId);
+  const diagnosticsAfterFirstTurn = structuredClone(diagnostics);
+
+  firstWorker.stdout.write("{malformed synthetic idle tail");
+  assert.equal(idleWorker.closed, true);
+  assert.equal(idleWorker.available, false);
+  assert.deepEqual(diagnostics, diagnosticsAfterFirstTurn);
+
+  const secondSubmitted = deferred();
+  const secondRun = conversation.run("success", {
+    onInputSubmitted: () => secondSubmitted.resolve(),
+  });
+  await Promise.race([
+    secondSubmitted.promise,
+    secondRun.then(() => {
+      throw Error("Second fake turn completed before input submission");
+    }),
+  ]);
+
+  const replacement = fixture.syntheticWorkers[1];
+  assert(replacement);
+  assert.notEqual(replacement, firstWorker);
+  const replacementWorker = [...fixture.backend.workers.values()][0];
+  assert(replacementWorker);
+  assert.notEqual(replacementWorker, idleWorker);
+  assert.equal(fixture.launches.length, 2);
+  assert.equal(replacement.inputs.length, 1);
+  assert.equal(firstWorker.inputs.length + replacement.inputs.length, 2);
+  assert.equal(replacementWorker.details.binding, binding);
+  assert.equal(fs.readFileSync(binding, "utf8"), bindingBefore);
+  assert.equal(conversation.state.session.id, nativeId);
+
+  replacement.emitFrames(...successfulFrames(nativeId));
+  await secondRun;
+
+  assert.equal(conversation.state.session.id, nativeId);
+  assert.equal(firstWorker.inputs.length + replacement.inputs.length, 2);
+  assert.deepEqual(diagnostics, diagnosticsAfterFirstTurn);
+  assert.equal(fixture.backend.workers.size, 1);
+  assert.equal([...fixture.backend.workers.values()][0], replacementWorker);
+  assert.equal(fixture.backend.active.size, 0);
+  assert.equal(fixture.backend.conversations.size, 0);
 });

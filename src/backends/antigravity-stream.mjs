@@ -415,7 +415,9 @@ export class AntigravityStreamWorker {
         return this.fail(Error("ANTIGRAVITY_PROTOCOL_ERROR"));
       }
     }
-    if (turn?.terminal && this.buffer.trim())
+    // An idle worker has no input that could own a partial trailing frame.
+    // Recycle it now so stale bytes cannot fail the next turn's preparation.
+    if ((!turn || turn.terminal) && this.buffer.trim())
       this.fail(Error("ANTIGRAVITY_PROTOCOL_ERROR"));
   }
   /** @param {any} event */
