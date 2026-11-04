@@ -66,6 +66,43 @@ test("QQ delivery and style rules reach both chat scopes without worked examples
   }
 });
 
+test("QQ face send syntax is documented only for enabled tools and distinguishes inbound annotations", (t) => {
+  const { runtime, store } = fixture(t, { cfg: config(1) }),
+    agent = runtime.agent("agent-0"),
+    self = store.bind(agent.id).identity.current(),
+    instructions = (toolNames) =>
+      stableInstructions(
+        agent,
+        self,
+        false,
+        {},
+        {
+          conversation: "group:20000",
+          toolNames,
+        },
+      ),
+    sendOnly = instructions(["qq_send"]),
+    burstOnly = instructions(["qq_send_burst"]),
+    withoutSending = instructions([]),
+    sendSpec = toolSpecs(["qq_send"])[0],
+    burstSpec = toolSpecs(["qq_send_burst"])[0];
+
+  assert.match(sendOnly, /qq_send\.segments/);
+  assert.match(sendOnly, /20[^\n]*偷笑|偷笑[^\n]*20/);
+  assert.match(sendOnly, /qqFaces[^\n]*(入站|原消息)[^\n]*(发送语法|发送格式)/);
+  assert.doesNotMatch(sendOnly, /qq_send_burst\.messages[^\n]*segments/);
+
+  assert.match(burstOnly, /qq_send_burst\.messages/);
+  assert.match(burstOnly, /segments/);
+  assert.doesNotMatch(
+    withoutSending,
+    /qq_send\.segments|qq_send_burst\.messages/,
+  );
+  assert.match(sendSpec.description, /segments/);
+  assert.match(sendSpec.description, /20[^\n]*偷笑|偷笑[^\n]*20/);
+  assert.match(burstSpec.description, /segments/);
+});
+
 test("QQ style is absent from protected work and other internal instruction scopes", (t) => {
   const { runtime, store } = fixture(t, { cfg: config(1) });
   const a = runtime.agent("agent-0"),
