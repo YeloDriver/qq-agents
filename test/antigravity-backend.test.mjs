@@ -23,6 +23,7 @@ import { toolSpecs } from "../src/tools/specs.mjs";
 import { AntigravityMedia } from "../src/backends/antigravity-media.mjs";
 import { colorGrid } from "../scripts/fixtures/antigravity-media.mjs";
 import { registry } from "../src/tools/registry.mjs";
+import { SessionPreparationFailure } from "../src/backends/turn-failure.mjs";
 
 const fixture = fileURLToPath(
   new URL("./antigravity-fixture.mjs", import.meta.url),
@@ -147,6 +148,90 @@ test("Antigravity resumes only its bound conversation and keeps prompts off argv
   );
   assert.equal(sessions.at(-1), null);
   assert.equal(launches.length, 2);
+});
+
+test("Antigravity keeps a bound session when per-turn preparation fails before input", async (t) => {
+  const { backend, params, sessions, launches } = setup(t);
+  await backend.run(params);
+  const session = sessions.at(-1);
+  assert(session);
+  const bindingFile = path.join(launches[0].options.cwd, "session.json");
+  const binding = fs.readFileSync(bindingFile, "utf8");
+  const originalPrepare = backend.prepare;
+  let inputSubmissions = 0;
+
+  backend.prepare = () => {
+    throw Error("SYNTHETIC_PREPARE_FAILURE");
+  };
+  try {
+    await assert.rejects(
+      backend.run({
+        ...params,
+        session,
+        onInputSubmitted: () => inputSubmissions++,
+      }),
+      (error) => {
+        assert(error instanceof SessionPreparationFailure);
+        assert.equal(error.message, "SYNTHETIC_PREPARE_FAILURE");
+        return true;
+      },
+    );
+  } finally {
+    backend.prepare = originalPrepare;
+  }
+
+  assert.equal(inputSubmissions, 0);
+  assert.equal(launches.length, 1);
+  assert.deepEqual(sessions.at(-1), session);
+  assert.equal(fs.readFileSync(bindingFile, "utf8"), binding);
+
+  await backend.run({
+    ...params,
+    session,
+    onInputSubmitted: () => inputSubmissions++,
+  });
+  assert.equal(inputSubmissions, 1);
+  assert.equal(launches.length, 2);
+  assert(launches[1].args.includes(session.id));
+  assert.equal(sessions.at(-1).id, session.id);
+  assert.equal(JSON.parse(fs.readFileSync(bindingFile, "utf8")).id, session.id);
+});
+
+test("Antigravity keeps a per-turn session when the input callback throws before stdin", async (t) => {
+  const { backend, params, sessions, calls, launches } = setup(t);
+  await backend.run(params);
+  const session = sessions.at(-1);
+  assert(session);
+  const bindingFile = path.join(launches[0].options.cwd, "session.json");
+  const binding = fs.readFileSync(bindingFile, "utf8");
+  const callCount = calls.length;
+  let callbackCalls = 0;
+
+  await assert.rejects(
+    backend.run({
+      ...params,
+      session,
+      onInputSubmitted() {
+        callbackCalls++;
+        throw Error("SYNTHETIC_INPUT_CALLBACK_FAILURE");
+      },
+    }),
+    (error) =>
+      error instanceof SessionPreparationFailure &&
+      error.message === "SYNTHETIC_INPUT_CALLBACK_FAILURE",
+  );
+
+  assert.equal(callbackCalls, 1);
+  assert.equal(launches.length, 2);
+  assert.equal(calls.length, callCount);
+  assert.equal(sessions.at(-1).id, session.id);
+  assert.equal(fs.readFileSync(bindingFile, "utf8"), binding);
+
+  await backend.run({ ...params, session });
+  assert.equal(launches.length, 3);
+  assert.equal(calls.length, callCount + 1);
+  assert.equal(sessions.at(-1).id, session.id);
+  assert.equal(JSON.parse(fs.readFileSync(bindingFile, "utf8")).id, session.id);
 });
 
 test("Antigravity makes only allowed parameter schemas visible before the first call", async (t) => {

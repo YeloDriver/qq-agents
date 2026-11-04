@@ -122,6 +122,12 @@ export class AntigravityStreamWorker {
       return reply(200, { alive: true });
     if (!this.live(turn))
       return reply(403, { error: "ANTIGRAVITY_TURN_INACTIVE" });
+    if (req.method === "POST" && req.url?.startsWith("/hook-denied")) {
+      if (req.url !== `/hook-denied?epoch=${turn.epoch}`)
+        return reply(403, { error: "ANTIGRAVITY_TURN_INACTIVE" });
+      turn.hookDenied = true;
+      return reply(200, {});
+    }
     if (req.method === "GET" && req.url === "/catalog")
       return reply(200, {
         tools: [dispatch],
@@ -219,6 +225,7 @@ export class AntigravityStreamWorker {
       contextTokens: /** @type {number | null} */ (null),
       bytes: 0,
       terminal: null,
+      hookDenied: false,
       media: new AntigravityMedia(this.mediaRoot),
       pending: new Set(),
       inputSubmitted: false,
@@ -301,7 +308,12 @@ export class AntigravityStreamWorker {
     } finally {
       turn.live = false;
       params.signal.removeEventListener("abort", abort);
-      turn.media.close();
+      try {
+        turn.media.close();
+      } catch {
+        // Finalization must release turn ownership even when Windows locks media.
+        console.warn("Antigravity turn media cleanup failed");
+      }
       this.lastUsed = Date.now();
       if (this.turn === turn) this.turn = null;
       this.timing(turn, "complete");
@@ -405,7 +417,11 @@ export class AntigravityStreamWorker {
         return;
       if (turn.terminal.status !== "SUCCESS")
         return this.fail(
-          antigravityFailure(this.diagnostic, turn.terminal.status),
+          antigravityFailure(
+            this.diagnostic + " " + (turn.terminal.error || ""),
+            turn.terminal.status,
+            turn.hookDenied,
+          ),
         );
       if (turn.contextTokens !== null)
         turn.params.onUsage?.({
