@@ -262,6 +262,7 @@ async function handleInput(line) {
   }
 
   const terminal = result(mode === "failure" ? "ERROR" : "SUCCESS");
+  if (mode === "wrong-result") terminal.result.conversation_id = randomUUID();
   event(terminal);
   record({
     type: "terminal",
@@ -269,6 +270,10 @@ async function handleInput(line) {
     conversationId,
     status: terminal.result.status,
   });
+  if (mode === "malformed-tail") {
+    process.stdout.write("{malformed synthetic tail");
+    return;
+  }
   if (terminal.result.status === "SUCCESS") {
     await new Promise((resolve) => setTimeout(resolve, 25));
     await postTool(epoch, "terminal-late");

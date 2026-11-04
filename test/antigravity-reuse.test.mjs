@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
+import { PassThrough, Writable } from "node:stream";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -31,7 +33,12 @@ const probe = {
 
 function setup(
   t,
-  { idleTimeoutMs = 30000, maxIdleProcesses = 2, callTool } = {},
+  {
+    idleTimeoutMs = 30000,
+    maxIdleProcesses = 2,
+    callTool,
+    fakeWorkers = false,
+  } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "qq-agy-reuse-test-"));
   const rawConfig = config();
@@ -49,10 +56,17 @@ function setup(
     ],
   }).backends[0];
   const launches = [];
+  const syntheticWorkers = [];
   const calls = [];
   const backend = new AntigravityBackend(backendConfig, rawConfig.agents[0], {
     root,
     spawn(_command, args, options) {
+      if (fakeWorkers) {
+        const child = createFakeWorker();
+        launches.push({ child, args, fake: true });
+        syntheticWorkers.push(child);
+        return child;
+      }
       const index = launches.length;
       const logFile = path.join(root, `fixture-${index}.jsonl`);
       const controlFile = path.join(root, `fixture-${index}.json`);
@@ -68,6 +82,13 @@ function setup(
       launches.push({ child, args, logFile, controlFile });
       return child;
     },
+    ...(fakeWorkers
+      ? {
+          stop(child, signal) {
+            child.kill(signal);
+          },
+        }
+      : {}),
   });
   t.after(async () => {
     await backend.close();
@@ -109,7 +130,127 @@ function setup(
       },
     };
   }
-  return { root, backend, launches, calls, chat };
+  return { root, backend, launches, syntheticWorkers, calls, chat };
+}
+
+function createFakeWorker() {
+  const child = new EventEmitter();
+  child.pid = 4242;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.inputs = [];
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  let inputBuffer = "";
+  child.stdin = new Writable({
+    write(chunk, _encoding, callback) {
+      inputBuffer += chunk.toString();
+      while (inputBuffer.includes("\n")) {
+        const end = inputBuffer.indexOf("\n");
+        const line = inputBuffer.slice(0, end);
+        inputBuffer = inputBuffer.slice(end + 1);
+        if (line.trim()) child.inputs.push(JSON.parse(line));
+      }
+      callback();
+    },
+  });
+  child.kill = (signal) => {
+    child.killedBy = signal;
+    return true;
+  };
+  child.emitFrames = (...frames) =>
+    child.stdout.write(
+      `${frames.map((frame) => JSON.stringify(frame)).join("\n")}\n`,
+    );
+  child.closeWith = (code, signal = null) => {
+    child.exitCode = signal ? null : code;
+    child.signalCode = signal;
+    child.emit("close", code, signal);
+  };
+  child.breakStdin = (code = "EPIPE") => {
+    const error = Object.assign(Error("SYNTHETIC_PRIVATE_IO_DETAIL"), { code });
+    child.stdin.emit("error", error);
+  };
+  return child;
+}
+
+function successfulFrames(id, stepIndex = 1) {
+  return [
+    {
+      event: "init",
+      conversation_id: id,
+      init: { agent: "qq-agents-fixture" },
+    },
+    {
+      event: "step_update",
+      step_update: {
+        conversation_id: id,
+        step_index: stepIndex,
+        step_type: "agent_response",
+        state: "DONE",
+        usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 1 },
+      },
+    },
+    {
+      event: "result",
+      result: {
+        status: "SUCCESS",
+        conversation_id: id,
+        response: "Synthetic success.",
+      },
+    },
+  ];
+}
+
+function assertSafeDiagnostics(entries) {
+  const enums = {
+    origin: ["terminal", "process-exit", "stdin", "protocol", "finalization"],
+    phase: ["preparing", "running", "settling", "terminal-observed", "settled"],
+    terminalStatus: ["SUCCESS", "ERROR", "CANCELLED", "unrecognized"],
+    ioCode: [
+      "EPIPE",
+      "ECONNRESET",
+      "ERR_STREAM_DESTROYED",
+      "ERR_STREAM_WRITE_AFTER_END",
+    ],
+    signal: ["SIGINT", "SIGTERM", "SIGKILL", "SIGABRT", "SIGSEGV"],
+    workerOutcome: ["recycled", "exit-warning", "healthy"],
+    sessionDisposition: ["retained", "retiring", "retired"],
+    backendOutcome: ["success", "failed", "cancelled"],
+  };
+  const fields = new Set([
+    ...Object.keys(enums),
+    "trustedTerminal",
+    "exitCode",
+    "elapsedMs",
+    "wrapperError",
+  ]);
+  for (const entry of entries) {
+    assert.deepEqual(
+      Object.keys(entry).filter((key) => !fields.has(key)),
+      [],
+      "diagnostics expose only approved fields",
+    );
+    for (const [key, allowed] of Object.entries(enums))
+      if (key in entry) assert(allowed.includes(entry[key]), `${key} is safe`);
+    if ("trustedTerminal" in entry)
+      assert.equal(typeof entry.trustedTerminal, "boolean");
+    if ("exitCode" in entry)
+      assert(
+        Number.isSafeInteger(entry.exitCode) &&
+          entry.exitCode >= -2147483648 &&
+          entry.exitCode <= 2147483647,
+      );
+    if ("elapsedMs" in entry)
+      assert(
+        Number.isFinite(entry.elapsedMs) &&
+          entry.elapsedMs >= 0 &&
+          entry.elapsedMs <= 86400000,
+      );
+    if ("wrapperError" in entry)
+      assert.equal(typeof entry.wrapperError, "boolean");
+  }
+  assert(!JSON.stringify(entries).includes("SYNTHETIC_PRIVATE_IO_DETAIL"));
 }
 
 const events = (launch) => {
@@ -298,9 +439,25 @@ test("cancelling one conversation leaves another reused worker running", async (
     (error) => error,
   );
 
+  const submittedHold = (conversation) => {
+    const session = conversation.state.session;
+    return (
+      session &&
+      launches.some((launch) => {
+        const log = events(launch);
+        return (
+          log.some(
+            (entry) =>
+              entry.type === "spawn" && entry.conversationId === session.id,
+          ) &&
+          log.some((entry) => entry.type === "input" && entry.mode === "hold")
+        );
+      })
+    );
+  };
   await waitFor(
-    () => first.state.session && second.state.session,
-    "both synthetic sessions",
+    () => submittedHold(first) && submittedHold(second),
+    "both fixture workers holding submitted turns",
   );
   assert.equal(launches.length, 2);
   const firstLaunch = launches.find((launch) =>
@@ -389,7 +546,149 @@ test("a cancellation during terminal MCP completion retires the session", async 
   assert.equal(launches.length, 1);
 });
 
-test("rejects duplicate init/results, successful results without a response, and stale response steps", async (t) => {
+test("an accepted terminal tool call settles before successful completion", async (t) => {
+  const gate = deferred();
+  const { backend, launches, calls, chat } = setup(t, {
+    callTool: async (name, args) => {
+      calls.push({ name, args });
+      return gate.promise;
+    },
+  });
+  const conversation = chat("private:terminal-settlement");
+  const terminal = deferred();
+  let completed = false;
+  const run = conversation
+    .run("pending-terminal", {
+      onTiming(value) {
+        if (value.phase === "terminal") terminal.resolve();
+      },
+    })
+    .then(() => {
+      completed = true;
+    });
+
+  await terminal.promise;
+  assert.equal(calls.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(completed, false);
+  gate.resolve({
+    content: [{ type: "text", text: "settled synthetic tool result" }],
+  });
+  await run;
+  assert.equal(completed, true);
+  assert(conversation.state.session);
+  assert.equal(backend.workers.size, 1);
+  assert.equal(launches.length, 1);
+});
+
+test("trusted success survives worker close and EPIPE while retiring the session", async (t) => {
+  for (const failure of ["close-zero", "close-seven", "epipe"]) {
+    const fixture = setup(t, { fakeWorkers: true });
+    const conversation = fixture.chat(`private:trusted-${failure}`);
+    const diagnostics = [];
+    const run = conversation.run("success", {
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await waitFor(
+      () => fixture.syntheticWorkers[0]?.inputs.length === 1,
+      `${failure} fake worker input`,
+    );
+    const child = fixture.syntheticWorkers[0];
+    const sessionId = "00000000-0000-4000-8000-000000000101";
+    child.emitFrames(...successfulFrames(sessionId));
+    if (failure === "close-zero") child.closeWith(0);
+    else if (failure === "close-seven") child.closeWith(7);
+    else child.breakStdin("EPIPE");
+
+    await run;
+    assert.equal(conversation.state.session, null, failure);
+    assert.equal(conversation.state.saved.at(-1), null, failure);
+    assert.equal(fixture.backend.workers.size, 0, failure);
+    assert.equal(fixture.launches.length, 1, failure);
+    assertSafeDiagnostics(diagnostics);
+    assert(
+      diagnostics.some(
+        (event) =>
+          event.origin === "terminal" &&
+          event.terminalStatus === "SUCCESS" &&
+          event.trustedTerminal === true,
+      ),
+      `${failure} records the trusted terminal`,
+    );
+    assert(
+      diagnostics.some(
+        (event) =>
+          event.origin === "finalization" && event.backendOutcome === "success",
+      ),
+      `${failure} preserves the successful backend outcome`,
+    );
+    assert(
+      diagnostics.some(
+        (event) =>
+          event.origin === "finalization" &&
+          event.sessionDisposition === "retired",
+      ),
+      `${failure} records conservative session retirement`,
+    );
+    if (failure === "epipe")
+      assert(diagnostics.some((event) => event.ioCode === "EPIPE"));
+  }
+});
+
+test("worker exit or EPIPE without a terminal still fails and retires the session", async (t) => {
+  for (const failure of ["exit", "epipe"]) {
+    const fixture = setup(t, { fakeWorkers: true });
+    const conversation = fixture.chat(`private:no-terminal-${failure}`);
+    const run = conversation.run("success");
+    await waitFor(
+      () => fixture.syntheticWorkers[0]?.inputs.length === 1,
+      `${failure} fake worker input`,
+    );
+    if (failure === "exit") fixture.syntheticWorkers[0].closeWith(7);
+    else fixture.syntheticWorkers[0].breakStdin("EPIPE");
+
+    await assert.rejects(run);
+    assert.equal(conversation.state.session, null, failure);
+    assert.equal(conversation.state.saved.at(-1), null, failure);
+    assert.equal(fixture.backend.workers.size, 0, failure);
+  }
+});
+
+test("a late event from a retired worker cannot change the next worker session", async (t) => {
+  const fixture = setup(t, { fakeWorkers: true });
+  const conversation = fixture.chat("private:late-retired-worker");
+  const firstRun = conversation.run("success");
+  await waitFor(
+    () => fixture.syntheticWorkers[0]?.inputs.length === 1,
+    "first fake worker input",
+  );
+  const oldWorker = fixture.syntheticWorkers[0];
+  const oldId = "00000000-0000-4000-8000-000000000102";
+  oldWorker.emitFrames(...successfulFrames(oldId));
+  oldWorker.closeWith(7);
+  await firstRun;
+  assert.equal(conversation.state.session, null);
+
+  const secondRun = conversation.run("success");
+  await waitFor(
+    () => fixture.syntheticWorkers[1]?.inputs.length === 1,
+    "replacement fake worker input",
+  );
+  const replacement = fixture.syntheticWorkers[1];
+  const replacementId = "00000000-0000-4000-8000-000000000103";
+  replacement.emitFrames(...successfulFrames(replacementId));
+  oldWorker.emitFrames(...successfulFrames(oldId, 2));
+  await secondRun;
+
+  assert.equal(conversation.state.session.id, replacementId);
+  assert.equal(fixture.backend.workers.size, 1);
+  assert.equal(
+    [...fixture.backend.workers.values()][0].nativeId,
+    replacementId,
+  );
+});
+
+test("rejects duplicate and invalid terminal frames, missing DONE, and stale response steps", async (t) => {
   const duplicateInit = setup(t);
   const duplicateInitChat = duplicateInit.chat("private:duplicate-init");
   await assert.rejects(
@@ -405,6 +704,22 @@ test("rejects duplicate init/results, successful results without a response, and
     /ANTIGRAVITY_PROTOCOL_ERROR/,
   );
   assert.equal(duplicate.launches.length, 1);
+
+  const wrong = setup(t);
+  const wrongChat = wrong.chat("private:wrong-result-id");
+  await assert.rejects(
+    wrongChat.run("wrong-result"),
+    /ANTIGRAVITY_PROTOCOL_ERROR/,
+  );
+  assert.equal(wrong.launches.length, 1);
+
+  const malformedTail = setup(t);
+  const malformedTailChat = malformedTail.chat("private:malformed-tail");
+  await assert.rejects(
+    malformedTailChat.run("malformed-tail"),
+    /ANTIGRAVITY_PROTOCOL_ERROR/,
+  );
+  assert.equal(malformedTail.launches.length, 1);
 
   const missing = setup(t);
   const missingChat = missing.chat("private:no-response");
@@ -759,14 +1074,20 @@ test("reused worker media cleanup failures preserve terminal outcomes and retire
     privateDetail,
     reportDeniedHook,
   ] of terminalErrors) {
-    const run = conversation.run("hold");
-    await waitFor(
-      () =>
-        [...backend.workers.values()].some(
-          (worker) => worker.turn?.inputSubmitted && worker.nativeId,
-        ),
-      "submitted held turn",
-    );
+    const initialized = deferred();
+    const run = conversation.run("hold", {
+      onTiming(value) {
+        if (value.phase === "initialized") initialized.resolve();
+      },
+    });
+    // Native startup can exceed a fixed polling budget during the full suite.
+    // Await protocol readiness, while surfacing a preparation failure immediately.
+    await Promise.race([
+      initialized.promise,
+      run.then(() => {
+        throw Error("SYNTHETIC_HELD_TURN_COMPLETED");
+      }),
+    ]);
     const worker = [...backend.workers.values()].find(
       (value) => value.turn?.inputSubmitted && value.nativeId,
     );
