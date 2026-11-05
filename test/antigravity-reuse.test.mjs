@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
@@ -8,7 +9,10 @@ import { PassThrough, Writable } from "node:stream";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { AntigravityBackend } from "../src/backends/antigravity.mjs";
+import {
+  AntigravityBackend,
+  listenAntigravityEndpoint,
+} from "../src/backends/antigravity.mjs";
 import { AntigravityMedia } from "../src/backends/antigravity-media.mjs";
 import {
   BackendTurnFailure,
@@ -295,7 +299,54 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function waitForTerminalOrRunFailure(terminal, run) {
+  await Promise.race([
+    terminal,
+    run.then(() => {
+      throw Error("Antigravity run completed before terminal timing");
+    }),
+  ]);
+}
+
 const exited = (child) => child.exitCode !== null || child.signalCode !== null;
+
+test("abort after closing a blocked endpoint does not leave a listener", async (t) => {
+  const server = http.createServer();
+  const controller = new AbortController();
+  const listen = server.listen.bind(server);
+  const address = server.address.bind(server);
+  const close = server.close.bind(server);
+  let listenCount = 0;
+  let reportedFetchBlockedPort = false;
+  server.listen = (...args) => {
+    listenCount += 1;
+    return listen(...args);
+  };
+  server.address = (...args) => {
+    const actual = address(...args);
+    if (!reportedFetchBlockedPort && actual && typeof actual === "object") {
+      reportedFetchBlockedPort = true;
+      return { ...actual, port: 6000 };
+    }
+    return actual;
+  };
+  server.close = (callback) =>
+    close((error) => {
+      controller.abort();
+      callback?.(error);
+    });
+  t.after(async () => {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  });
+
+  await assert.rejects(
+    listenAntigravityEndpoint(server, controller.signal),
+    /ABORTED/,
+  );
+  assert.equal(reportedFetchBlockedPort, true);
+  assert.equal(listenCount, 1);
+  assert.equal(server.listening, false);
+});
 
 test("keeps one CLI for three turns and scopes epochs, terminal calls, idle calls, and usage", async (t) => {
   const { backend, launches, calls, chat } = setup(t);
@@ -530,7 +581,7 @@ test("a cancellation during terminal MCP completion retires the session", async 
     },
   });
 
-  await terminal.promise;
+  await waitForTerminalOrRunFailure(terminal.promise, run);
   assert.equal(calls.length, 1);
   conversation.controller.abort();
   await assert.rejects(run, /ABORTED/);
@@ -547,6 +598,27 @@ test("a cancellation during terminal MCP completion retires the session", async 
 });
 
 test("an accepted terminal tool call settles before successful completion", async (t) => {
+  const createServer = http.createServer.bind(http);
+  let bindCount = 0;
+  let reportedFetchBlockedPort = false;
+  t.mock.method(http, "createServer", (...args) => {
+    const server = createServer(...args);
+    const listen = server.listen.bind(server);
+    server.listen = (...listenArgs) => {
+      bindCount += 1;
+      return listen(...listenArgs);
+    };
+    const address = server.address.bind(server);
+    server.address = (...addressArgs) => {
+      const actual = address(...addressArgs);
+      if (!reportedFetchBlockedPort && actual && typeof actual === "object") {
+        reportedFetchBlockedPort = true;
+        return { ...actual, port: 6000 };
+      }
+      return actual;
+    };
+    return server;
+  });
   const gate = deferred();
   const { backend, launches, calls, chat } = setup(t, {
     callTool: async (name, args) => {
@@ -567,8 +639,8 @@ test("an accepted terminal tool call settles before successful completion", asyn
       completed = true;
     });
 
-  await terminal.promise;
-  assert.equal(calls.length, 1);
+  await waitForTerminalOrRunFailure(terminal.promise, run);
+  assert.deepEqual(calls, [{ name: "probe", args: { value: "pending" } }]);
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(completed, false);
   gate.resolve({
@@ -579,6 +651,8 @@ test("an accepted terminal tool call settles before successful completion", asyn
   assert(conversation.state.session);
   assert.equal(backend.workers.size, 1);
   assert.equal(launches.length, 1);
+  assert.equal(reportedFetchBlockedPort, true);
+  assert(bindCount >= 2, `expected a rebind after port 6000, got ${bindCount}`);
 });
 
 test("trusted success survives worker close and EPIPE while retiring the session", async (t) => {

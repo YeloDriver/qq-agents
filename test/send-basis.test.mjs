@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture, config, context, settle } from "./helpers.mjs";
+import {
+  fixture,
+  config,
+  context,
+  settle,
+  listenForFetch,
+} from "./helpers.mjs";
 import { activityPage } from "../src/core/activity.mjs";
 import { createServer } from "../src/server.mjs";
 
@@ -375,7 +381,7 @@ test("the activity API returns the basis and the page shows it in one line", asy
   });
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const page = await (
     await fetch(

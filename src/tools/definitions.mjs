@@ -1,5 +1,8 @@
 // @ts-check
 import { reactionDefinitions } from "./reactions.mjs";
+import { groupReadDefinitions } from "./group-read.mjs";
+import { profileDefinitions } from "./profile.mjs";
+import { qzoneDefinitions } from "./qzone.mjs";
 import { gameDefinitions } from "../games/framework/tools.mjs";
 import { appDefinitions } from "../apps/tools.mjs";
 import { githubDefinitions } from "../github/tools.mjs";
@@ -10,6 +13,7 @@ import { screenshotDefinitions } from "./screenshots.mjs";
 import { z } from "zod";
 import { qqSegmentsSchema } from "./qq-message.mjs";
 import { legacyDefinitions } from "./legacy.mjs";
+import { homeDefinitions } from "./home.mjs";
 import { boardDefinitions } from "./board.mjs";
 const str = z.string(),
   limit = z.number().int().min(1).max(50).optional(),
@@ -79,7 +83,11 @@ export const definitions = {
   ...appDefinitions,
   ...gameDefinitions,
   ...reactionDefinitions,
+  ...groupReadDefinitions,
+  ...profileDefinitions,
+  ...qzoneDefinitions,
   ...boardDefinitions,
+  ...homeDefinitions,
   memory_search: [
     "检索自己的跨会话经历/日记，私聊也能回忆自己的普通群聊记录。conversationType=group/private筛选聊天类型；conversation仅接受具体来源键。省略来源筛选会跨会话搜索。hasMore时用continueWith续查，不能将第一页当成全部记忆。相邻发言不等于同一话题，按ID展开原文并判断适合表达的回忆。",
     z
@@ -307,12 +315,14 @@ export const definitions = {
       .strict(),
   ],
   web_fetch: [
-    "读取公开网页文本，阻止内网地址与危险重定向。",
+    "读取公开网页，阻止内网地址与危险重定向。默认 mode text 返回去掉导航、脚本等后的网页正文（优先 article/main），非 HTML 原样返回；mode raw 返回源码。按 nextOffset 续读同一页面，nextOffset 为 null 才算读到下载内容的末尾；downloadTruncated 为 true 时页面超过下载上限，totalChars 为 null，读到末尾也不能说读过全文。授权只看 url，offset、maxChars 和 mode 不影响授权。",
     z
       .object({
         url: str,
         requestEventId: str.optional(),
-        maxChars: z.number().int().min(100).max(16000).optional(),
+        offset: z.number().int().min(0).default(0),
+        maxChars: z.number().int().min(100).max(16000).default(12000),
+        mode: z.enum(["text", "raw"]).default("text"),
       })
       .strict(),
   ],

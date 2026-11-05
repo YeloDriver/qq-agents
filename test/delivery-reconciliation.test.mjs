@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createServer } from "../src/server.mjs";
-import { fixture, context } from "./helpers.mjs";
+import { fixture, context, listenForFetch } from "./helpers.mjs";
 
 async function unknownSend(runtime, requestId, text = "晚上八点见") {
   const transport = runtime.transports.get("qq-0");
@@ -81,7 +81,7 @@ test("console lists, reconciles and reports blockers over HTTP", async (t) => {
   const f = fixture(t),
     token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const request = (url, body) =>
     fetch(`http://127.0.0.1:${port}${url}`, {

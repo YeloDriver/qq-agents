@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import { config, fixture } from "./helpers.mjs";
+import { config, fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 function element(name, label) {
@@ -41,7 +41,7 @@ async function setup(t) {
     token: "test-admin",
     allowLive: true,
   });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const inputs = {
     groups: element("groups", "群白名单（逗号分隔）"),

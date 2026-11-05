@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { fixture, context, config } from "./helpers.mjs";
+import { fixture, context, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { restoreExport } from "../src/memory/migrate.mjs";
@@ -503,7 +503,7 @@ test("the console shows a card's items read-only, open ones first", async (t) =>
     m = f.store.bind("agent-0");
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const e = said(m, "证据");
   m.identity.savePersonCard(

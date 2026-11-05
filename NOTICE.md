@@ -8,7 +8,7 @@ QQ Agents (formerly developed privately as QQ Bridge Unified) is an independent 
 
 `vendor/` contains the explicitly reused modules. Runtime integration and new memory implementation live in `src/`. No SnowLuma SDK, MCP package, QQ client, NapCat binary, DSH application, or Codex application is bundled. Each external application retains its own license. See vendor/social-reader for its dependency notices.
 
-The vendored forward helper changes only its Markdown-helper import path. The social-reader search adapter supplies the objective field required by the verified Exa schema. All vendored source hashes, local modifications and baseline origins are recorded in docs/SOURCES.json.
+The vendored forward helper changes only its Markdown-helper import path. The social-reader search adapter supplies the objective field required by the verified Exa schema. The social-reader safe fetcher calls a caller-supplied authorization hook for each hop and reports the response Content-Type; its address, DNS and redirect checks are unchanged. All vendored source hashes, local modifications and baseline origins are recorded in docs/SOURCES.json.
 
 - shadowfish07/heybox-cli at `0a03f8884f35298bf26d37dfb8b390e2b5ac1d21`: MIT read API signature port; original license in `vendor/heybox/LICENSE`. plasta2steel/dsh-xiaoheihe at `32bc17d707397af48368db759548806763bca6aa` was read as an endpoint/response reference only.
 - Platform adapters call a locally installed OpenCLI 1.8.4 through its fixed read commands and helpers. OpenCLI and browser login material are not bundled. The tested version is pinned at the adapter boundary; other versions fail with an explicit compatibility error.
@@ -16,3 +16,7 @@ The vendored forward helper changes only its Markdown-helper import path. The so
 Current npm dependency licenses are recorded in package-lock.json. Distributed copies must preserve the applicable upstream copyright and license notices. The root LICENSE contains the MIT license; historical upstream commentary does not add permissions for external applications.
 
 - QQ system-face identifier/name facts are referenced from NapNeko/NapCatQQ `packages/napcat-core/external/face_config.json`, Git blob `ba937ea96f315235c80e34039d5c039f9b8e2d3c`. Only identifier/name pairs are included; no QQ artwork, animation, or NapCat implementation is bundled. See docs/QQ-FACES.md.
+
+## 纸页小窝生成素材
+
+`public/home-preview/assets/` 的 26 张手绘纸板与纸片由维护者委托 OpenAI imagegen 生成，作为 QQ Agents 项目贡献按根目录 MIT 许可提供。来源、提示词、原图哈希及 WebP 转换记录见 [素材说明](docs/AI-HOME-ASSETS.md)；原始用户参考附件不包含在发布素材中。

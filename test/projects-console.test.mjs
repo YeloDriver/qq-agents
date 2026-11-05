@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { fixture, context } from "./helpers.mjs";
+import { fixture, context, listenForFetch } from "./helpers.mjs";
 import { FileStore } from "../src/tools/files.mjs";
 import { createServer } from "../src/server.mjs";
 import { compareProjectText } from "../src/core/projects-console.mjs";
@@ -12,7 +12,7 @@ async function setup(t) {
     token = randomBytes(32).toString("hex");
   f.runtime.files = new FileStore(path.join(f.root, "files"));
   const app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const request = (route, auth = true) =>
     fetch(`http://127.0.0.1:${port}${route}`, {

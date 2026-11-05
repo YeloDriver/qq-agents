@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
-import { fixture, config, FakeTransport } from "./helpers.mjs";
+import { fixture, config, FakeTransport, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { Lifecycle } from "../src/transport/lifecycle.mjs";
 
@@ -22,7 +22,7 @@ test("shutdown waits for an in-flight HTTP tool receipt after its model turn can
       }),
   });
   const app = createServer({ runtime: f.runtime, token: "synthetic-admin" });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   f.runtime.conversations.request("agent-0", "group:20000", "message", {
     immediate: true,

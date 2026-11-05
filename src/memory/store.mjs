@@ -1,3 +1,4 @@
+import { mergeProtection } from "./protection.mjs";
 import { withoutClosenessCache } from "../core/closeness.mjs";
 import { recallAnnotation } from "./recalls.mjs";
 import fs from "node:fs";
@@ -80,6 +81,7 @@ function budget(items, maxChars) {
         disclosure: item.disclosure,
         ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
         summaryOmitted: true,
+        ...mergeProtection(item),
         ...(item.protectedOperations ? { protectedOperations: true } : {}),
         ...(item.protectedRepositories?.length
           ? { protectedRepositories: item.protectedRepositories }
@@ -137,6 +139,12 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS board_entries(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,post_id TEXT,reply_to TEXT,author_kind TEXT NOT NULL,author_id TEXT NOT NULL,request_id TEXT,title TEXT NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at TEXT NOT NULL,removed_at TEXT,UNIQUE(author_kind,author_id,request_id));
       CREATE INDEX IF NOT EXISTS board_threads ON board_entries(post_id,seq);
       CREATE INDEX IF NOT EXISTS board_quota ON board_entries(author_kind,author_id,day);
+      CREATE TABLE IF NOT EXISTS home_rooms(generation TEXT PRIMARY KEY,content_revision INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS home_items(generation TEXT NOT NULL,slot TEXT NOT NULL,item_id TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(generation,slot));
+      CREATE TABLE IF NOT EXISTS home_write_usage(generation TEXT NOT NULL,day TEXT NOT NULL,writes INTEGER NOT NULL,PRIMARY KEY(generation,day));
+      CREATE TABLE IF NOT EXISTS home_identities(agent_id TEXT PRIMARY KEY,generation TEXT NOT NULL,active INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS home_layouts(scene_key TEXT NOT NULL,revision INTEGER NOT NULL,layout TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(scene_key,revision));
+      CREATE TABLE IF NOT EXISTS home_operations(scene_key TEXT NOT NULL,request_id TEXT NOT NULL,digest TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(scene_key,request_id));
       CREATE TABLE IF NOT EXISTS board_reads(agent_id TEXT PRIMARY KEY,seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS board_mentions(entry_seq INTEGER NOT NULL,target_kind TEXT NOT NULL,target_id TEXT NOT NULL,PRIMARY KEY(entry_seq,target_kind,target_id));
       CREATE INDEX IF NOT EXISTS board_mention_targets ON board_mentions(target_kind,target_id,entry_seq);
@@ -321,6 +329,7 @@ class AgentMemory {
         status: outcome.status,
       },
       notice: "发送尝试；正文和发送结果只在 outcome 这条记录里出现一次。",
+      ...mergeProtection(payload),
       protectedRepositories: payload.protectedRepositories || [],
       ...(payload.protectedOperations === true
         ? { protectedOperations: true }
@@ -373,6 +382,7 @@ class AgentMemory {
       direction: row.direction,
       origin: row.origin,
       disclosure: disclosure(row.conversation, current),
+      ...mergeProtection(parse(row.payload)),
       protectedRepositories: parse(row.payload).protectedRepositories || [],
       ...(parse(row.payload).protectedOperations === true
         ? { protectedOperations: true }
@@ -415,6 +425,7 @@ class AgentMemory {
       metadata: parse(row.metadata),
       disclosure: "agent-judged-diary",
       privacy: "personal-diary",
+      ...mergeProtection(parse(row.metadata)),
       protectedOperations: parse(row.metadata).protectedOperations === true,
       protectedRepositories: parse(row.metadata).protectedRepositories || [],
     };
@@ -702,6 +713,7 @@ class AgentMemory {
       totalChars: complete.length,
       disclosure: item.disclosure,
       conversation: item.conversation,
+      ...mergeProtection(item),
       protectedOperations: item.protectedOperations === true,
       protectedRepositories: item.protectedRepositories || [],
     };
@@ -799,20 +811,23 @@ class AgentMemory {
     writtenIn = null,
     protectedOperations = false,
     protectedRepositories = [],
+    protectedPeerQzoneTargets = [],
   ) {
     text(title, 300);
     text(body, 32000);
     if (!title.trim() || !body.trim()) throw Error("EMPTY_DIARY");
     // Only a reference to the mood in effect, never a copy of it.
     const mood = this.identity.currentMood(Date.now()),
+      evidenceMetadata = this.metadata({ people, tags, evidence }),
       metadata = {
-        ...this.metadata({ people, tags, evidence }),
+        ...evidenceMetadata,
+        ...mergeProtection(evidenceMetadata, {
+          protectedPeerQzoneTargets,
+          protectedOperations,
+          protectedRepositories,
+        }),
         writtenIn,
         ...(mood ? { moodId: mood.id } : {}),
-        ...(protectedOperations ? { protectedOperations: true } : {}),
-        ...(protectedRepositories.length
-          ? { protectedRepositories: [...new Set(protectedRepositories)] }
-          : {}),
       },
       id = randomUUID(),
       time = now();
@@ -976,12 +991,21 @@ class AgentMemory {
           .get(this.agentId, id, this.agentId, id)
       )
         throw Error("EVIDENCE_NOT_OWNED");
-    return { people, tags, evidence };
+    const protection = evidence.map((id) => {
+      const row = this.db
+        .prepare(
+          "SELECT payload AS metadata FROM events WHERE agent_id=? AND id=? UNION ALL SELECT metadata FROM diaries WHERE agent_id=? AND id=?",
+        )
+        .get(this.agentId, id, this.agentId, id);
+      return row ? parse(row.metadata) : {};
+    });
+    return { people, tags, evidence, ...mergeProtection(...protection) };
   }
   diaryRevise(
     { id, expectedRevision, title, body, people, tags, evidence },
     protectedOperations = false,
     protectedRepositories = [],
+    protectedPeerQzoneTargets = [],
   ) {
     text(title, 300);
     text(body, 32000);
@@ -993,29 +1017,21 @@ class AgentMemory {
       if (!old) throw Error("RECORD_NOT_FOUND");
       if (old.revision !== expectedRevision) throw Error("REVISION_CONFLICT");
       const previous = parse(old.metadata),
+        evidenceMetadata = this.metadata({
+          people: people ?? previous.people,
+          tags: tags ?? previous.tags,
+          evidence: evidence ?? previous.evidence,
+        }),
         metadata = {
-          ...this.metadata({
-            people: people ?? previous.people,
-            tags: tags ?? previous.tags,
-            evidence: evidence ?? previous.evidence,
+          ...evidenceMetadata,
+          ...mergeProtection(previous, evidenceMetadata, {
+            protectedPeerQzoneTargets,
+            protectedOperations,
+            protectedRepositories,
           }),
           ...(previous.writtenIn ? { writtenIn: previous.writtenIn } : {}),
           // The mood it was written in, not the mood at revision time.
           ...(previous.moodId ? { moodId: previous.moodId } : {}),
-          ...(previous.protectedRepositories?.length ||
-          protectedRepositories.length
-            ? {
-                protectedRepositories: [
-                  ...new Set([
-                    ...(previous.protectedRepositories || []),
-                    ...protectedRepositories,
-                  ]),
-                ],
-              }
-            : {}),
-          ...(previous.protectedOperations || protectedOperations
-            ? { protectedOperations: true }
-            : {}),
         };
       const revision = old.revision + 1,
         time = now();

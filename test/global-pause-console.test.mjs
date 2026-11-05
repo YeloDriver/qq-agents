@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import { config, fixture } from "./helpers.mjs";
+import { config, fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 async function setup(t, mode = "live") {
@@ -17,7 +17,7 @@ async function setup(t, mode = "live") {
     token: "test-admin",
     allowLive: true,
   });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const nodes = new Map();
   const node = (s) => {

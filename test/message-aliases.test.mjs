@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { temp, fixture, config, raw } from "./helpers.mjs";
+import { temp, fixture, config, raw, listenForFetch } from "./helpers.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import {
   inspectLegacy,
@@ -162,7 +162,7 @@ test("v2 HTTP snapshots retain alias and observation identity across restore", a
     runtime: runtimeFixture.runtime,
     token: "synthetic-export-admin",
   });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   const response = await fetch(
     `http://127.0.0.1:${port}/api/export?agentId=agent-0`,

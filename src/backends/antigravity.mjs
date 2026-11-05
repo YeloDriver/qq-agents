@@ -30,6 +30,51 @@ import { AntigravityStreamWorker } from "./antigravity-stream.mjs";
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MAX_OUTPUT = 16 * 1024 * 1024;
+// MCP and hook children use Fetch, which rejects restricted ports on loopback too.
+const fetchBlockedPorts = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723,
+  2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669,
+  6679, 6697, 10080,
+]);
+/** Bind an OS-selected loopback port usable by the real MCP and hook clients.
+ * @param {import("node:http").Server} server
+ * @param {AbortSignal} signal */
+export async function listenAntigravityEndpoint(server, signal) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (signal.aborted) throw Error("ABORTED");
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve(undefined);
+      });
+    });
+    const address = server.address();
+    if (
+      !signal.aborted &&
+      address &&
+      typeof address !== "string" &&
+      !fetchBlockedPorts.has(address.port)
+    )
+      return address.port;
+    await new Promise((resolve, reject) =>
+      server.close((error) => {
+        if (
+          error &&
+          /** @type {NodeJS.ErrnoException} */ (error).code !==
+            "ERR_SERVER_NOT_RUNNING"
+        )
+          reject(error);
+        else resolve(undefined);
+      }),
+    );
+  }
+  throw Error(signal.aborted ? "ABORTED" : "ANTIGRAVITY_ENDPOINT_INVALID");
+}
+
 /** Headless result usage is cumulative; only a completed model-response step
  * describes the latest request. Cache reads are excluded from input_tokens.
  * @param {any} usage */
@@ -829,16 +874,13 @@ export class AntigravityBackend {
         });
       }
     });
-    await new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => resolve(undefined));
-    });
+    const port = await listenAntigravityEndpoint(server, params.signal);
     if (this.conversations.has(key)) {
       server.close();
       throw Error("ANTIGRAVITY_CONVERSATION_BUSY");
     }
     this.conversations.add(key);
-    const endpoint = `http://127.0.0.1:${/** @type {import("node:net").AddressInfo} */ (server.address()).port}`;
+    const endpoint = `http://127.0.0.1:${port}`;
     /** @type {import("node:child_process").ChildProcess | undefined} */
     let child;
     /** @type {NodeJS.Timeout | undefined} */

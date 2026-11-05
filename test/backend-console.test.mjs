@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import fs from "node:fs";
-import { fixture, config } from "./helpers.mjs";
+import { fixture, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 test("console recovery and automatic-recovery controls call real admin routes without changing QQ settings", async (t) => {
@@ -20,7 +20,7 @@ test("console recovery and automatic-recovery controls call real admin routes wi
     token: "test-admin",
     allowLive: true,
   });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const nodes = new Map();
   const node = (s) => {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { config, fixture, context } from "./helpers.mjs";
+import { config, fixture, context, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 const repo = "fixture/private";
@@ -233,7 +233,7 @@ test("admin recovery rejects unauthenticated and unpaused requests and never sen
     scope = "group:20000";
   const token = "a".repeat(64);
   const server = createServer({ runtime: f.runtime, token, allowLive: true });
-  const port = await server.listen(0);
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   const url = `http://127.0.0.1:${port}/api/session/recover`;
   const post = (authenticated) =>

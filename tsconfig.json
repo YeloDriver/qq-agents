@@ -10,7 +10,13 @@
     "skipLibCheck": true
   },
   "include": [
+    "src/core/peer-profile.mjs",
+    "src/core/group-read.mjs",
+    "src/tools/group-read.mjs",
+    "src/tools/web-text.mjs",
+    "src/transport/group-read.mjs",
     "src/core/board.mjs",
+    "src/core/peer-qzone-protection.mjs",
     "src/core/closeness.mjs",
     "src/core/message-recall.mjs",
     "src/memory/recalls.mjs",
@@ -45,7 +51,12 @@
     "src/core/mind-policy.mjs",
     "src/core/policy.mjs",
     "src/core/reactions.mjs",
+    "src/core/profile.mjs",
     "src/tools/reactions.mjs",
+    "src/tools/profile.mjs",
+    "src/core/qzone.mjs",
+    "src/core/peer-qzone.mjs",
+    "src/tools/qzone.mjs",
 
     "src/core/rhythm.mjs",
     "src/core/typing.mjs",
@@ -81,6 +92,14 @@
     "scripts/game-p1b.mjs",
     "src/games/framework/*.mjs",
     "scripts/game-p2-acceptance.mjs",
-    "scripts/game-compatibility.mjs"
+    "scripts/game-compatibility.mjs",
+    "public/home-preview/scene.mjs",
+    "public/home-space/book.mjs",
+    "src/home/layout.mjs",
+    "src/home/store.mjs",
+    "src/home/service.mjs",
+    "src/home/policy.mjs",
+    "src/home/room-store.mjs",
+    "src/home/rooms.mjs"
   ]
 }

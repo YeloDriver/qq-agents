@@ -9,6 +9,7 @@ import {
   antigravityFailure,
   antigravityDiagnostic,
   responseOccupancy,
+  listenAntigravityEndpoint,
 } from "./antigravity.mjs";
 import { mcpResult } from "../tools/index.mjs";
 import { safeToolFailure } from "../tools/errors.mjs";
@@ -299,15 +300,12 @@ export class AntigravityStreamWorker {
     try {
       if (params.signal.aborted) throw Error("ABORTED");
       if (!this.child) {
-        await new Promise((resolve, reject) => {
-          this.server.once("error", reject);
-          this.server.listen(0, "127.0.0.1", () => {
-            this.server.removeListener("error", reject);
-            resolve(undefined);
-          });
-        });
+        const port = await listenAntigravityEndpoint(
+          this.server,
+          params.signal,
+        );
         if (!this.live(turn)) throw Error("ABORTED");
-        const endpoint = `http://127.0.0.1:${/** @type {import("node:net").AddressInfo} */ (this.server.address()).port}`;
+        const endpoint = `http://127.0.0.1:${port}`;
         const settings = this.owner.configure(
           params,
           this.details,

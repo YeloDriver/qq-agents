@@ -1,4 +1,7 @@
 import { reactionDefinitions, reactionTool } from "./reactions.mjs";
+import { groupReadDefinitions, groupReadTool } from "./group-read.mjs";
+import { profileDefinitions, profileTool } from "./profile.mjs";
+import { qzoneDefinitions, qzoneTool } from "./qzone.mjs";
 import { gameDefinitions, gameTool } from "../games/framework/tools.mjs";
 import { definitions } from "./definitions.mjs";
 import { TOOL_NAMES } from "./names.mjs";
@@ -10,6 +13,7 @@ import { fileDefinitions, fileTool } from "./file-tools.mjs";
 import { savedMediaDefinitions, savedMediaTool } from "./saved-media.mjs";
 import { screenshotDefinitions, screenshotTool } from "./screenshots.mjs";
 import { legacyDefinitions, legacyTool } from "./legacy.mjs";
+import { homeDefinitions, homeTool } from "./home.mjs";
 import { boardDefinitions, boardTool } from "./board.mjs";
 
 // Discovery and dispatch use this same registry. Fail at load time on drift.
@@ -22,6 +26,9 @@ for (const [group, dispatch] of [
   [appDefinitions, appTool],
   [gameDefinitions, gameTool],
   [reactionDefinitions, reactionTool],
+  [groupReadDefinitions, groupReadTool],
+  [profileDefinitions, profileTool],
+  [qzoneDefinitions, qzoneTool],
   [githubDefinitions, githubTool],
   [mindDefinitions, mindTool],
   [fileDefinitions, fileTool],
@@ -29,6 +36,7 @@ for (const [group, dispatch] of [
   [screenshotDefinitions, screenshotTool],
   [legacyDefinitions, legacyTool],
   [boardDefinitions, boardTool],
+  [homeDefinitions, homeTool],
 ])
   for (const name of Object.keys(group)) {
     if (Object.hasOwn(handlers, name)) throw Error("DUPLICATE_TOOL_HANDLER");

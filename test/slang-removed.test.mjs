@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { config, temp, FakeTransport } from "./helpers.mjs";
+import { config, temp, FakeTransport, listenForFetch } from "./helpers.mjs";
 import { ConfigStore } from "../src/core/config.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { Runtime } from "../src/core/runtime.mjs";
@@ -82,7 +82,7 @@ test("the runtime and console start from a pre-0.5.3 config without offering sla
     runtime.transports.set(c.id, new FakeTransport());
   const token = "synthetic-admin",
     app = createServer({ runtime, token, allowLive: true });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(async () => {
     await app.close();
     await runtime.close();

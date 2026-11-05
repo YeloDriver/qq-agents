@@ -1,3 +1,7 @@
+import {
+  peerQzoneSources,
+  trackPeerQzone,
+} from "../core/peer-qzone-protection.mjs";
 import { withInteraction } from "../core/closeness.mjs";
 import { recallMessage } from "../core/message-recall.mjs";
 import { deliveryPage } from "../core/chat-context.mjs";
@@ -8,6 +12,7 @@ import { externalArguments, externalResult } from "./external-media.mjs";
 import { taintMedia } from "./legacy.mjs";
 import { SocialReader } from "../../vendor/social-reader/reader.mjs";
 import { safeFetch } from "../../vendor/social-reader/safe-fetch.js";
+import { WEB_FETCH_DOWNLOAD_CHARS, webPage } from "./web-text.mjs";
 import { recallBoundary, recallPage } from "../core/recall-boundary.mjs";
 import {
   markPersonCardShown,
@@ -15,6 +20,12 @@ import {
 } from "../core/person-cards.mjs";
 function track(ctx, items) {
   for (const row of items) {
+    trackPeerQzone(ctx, row);
+    for (const item of [
+      ...(row.scene?.messages || []),
+      ...(row.scene?.quoted || []),
+    ])
+      trackPeerQzone(ctx, item);
     for (const item of [
       row,
       ...(row.scene?.messages || []),
@@ -134,11 +145,13 @@ async function handle_diary_write(runtime, ctx, args, name) {
         },
         protectedOperations,
         privateGithubSources(ctx, runtime),
+        peerQzoneSources(runtime, ctx),
       )
     : mem.diaryRevise(
         args,
         protectedOperations,
         privateGithubSources(ctx, runtime),
+        peerQzoneSources(runtime, ctx),
       );
 }
 function assertReadCheckpoint(ctx, throughSeq) {
@@ -397,6 +410,11 @@ async function handle_sticker_list(runtime, ctx, args, name) {
   return rows;
 }
 async function handle_sticker_collect(runtime, ctx, args, name) {
+  const meta = runtime.media.metadata(ctx.agentId, args.mediaId);
+  recallBoundary(runtime, ctx).assert(meta);
+  taintMedia(ctx, meta);
+  if (peerQzoneSources(runtime, ctx).length)
+    throw Error("RESTRICTED_CONTEXT_MIND_WRITE_BLOCKED");
   return runtime.media.collect(ctx.agentId, args.mediaId, args);
 }
 async function handle_sticker_read(runtime, ctx, args, name) {
@@ -464,10 +482,13 @@ async function handle_web_fetch(runtime, ctx, args, name) {
   runtime.authorizeExternal(ctx, request, {
     requestEventId: args.requestEventId,
   });
-  if (name === "web_fetch")
-    return (runtime.fetchPublicPage || safeFetch)(
+  if (name === "web_fetch") {
+    // The download limit is separate from the page window, so offset pages
+    // through the same extracted text. offset/mode stay local and never enter
+    // the authorization request above.
+    const page = await (runtime.fetchPublicPage || safeFetch)(
       args.url,
-      args.maxChars || 12000,
+      WEB_FETCH_DOWNLOAD_CHARS,
       {
         authorize: (url) =>
           runtime.authorizeExternal(
@@ -478,6 +499,12 @@ async function handle_web_fetch(runtime, ctx, args, name) {
           ),
       },
     );
+    return webPage(page, {
+      offset: args.offset,
+      maxChars: args.maxChars,
+      mode: args.mode,
+    });
+  }
   runtime.social ??= new SocialReader();
   if (name === "social_search") return runtime.social.perform("search", args);
   if (name === "social_read") return runtime.social.perform("read", args);

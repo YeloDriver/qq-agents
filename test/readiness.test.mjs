@@ -7,7 +7,7 @@ import { validateConfig } from "../src/core/config.mjs";
 import { defaultConfig } from "../src/core/default-config.mjs";
 import { readiness } from "../src/core/readiness.mjs";
 import { createServer } from "../src/server.mjs";
-import { config, fixture } from "./helpers.mjs";
+import { config, fixture, listenForFetch } from "./helpers.mjs";
 
 const status = (
   cfg,
@@ -146,7 +146,7 @@ async function serve(t, { allowLive, mode = "isolated" } = {}) {
   const f = fixture(t, { cfg }),
     token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token, allowLive });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const call = async (url, data) => {
     const r = await fetch(`http://127.0.0.1:${port}${url}`, {

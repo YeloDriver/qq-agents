@@ -54,7 +54,7 @@ const browserScripts = {
     "tools",
   ],
   "activity-ui.js": ["activityAgentId", "renderActivity"],
-  "board-ui.js": ["renderBoard"],
+  "board-ui.js": ["renderBoard", "createBoardView"],
   "agent-form.js": ["agentForm"],
   "apps-ui.js": ["appAgentId", "renderApps"],
   "files-ui.js": ["fileAgentId", "renderFilePermissions"],
@@ -125,6 +125,10 @@ export default [
       // only report unused variables inside functions.
       "no-unused-vars": ["error", { ...unusedVars, vars: "local" }],
     },
+  },
+  {
+    files: ["public/home-preview/*.mjs", "public/home-space/*.mjs"],
+    languageOptions: { sourceType: "module", globals: globals.browser },
   },
   ...Object.keys(browserScripts).map((file) => ({
     files: [`public/${file}`],

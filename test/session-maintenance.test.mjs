@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixture, config, raw } from "./helpers.mjs";
+import { fixture, config, raw, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { Runtime } from "../src/core/runtime.mjs";
 import { waitForDrain } from "../src/updates/drain.mjs";
@@ -134,7 +134,7 @@ test("draining admits existing HTTP tools and receipts, queues new input, and bl
     },
   });
   const app = createServer({ runtime: f.runtime, token: "synthetic-admin" });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const request = async (route, body, capability) => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {

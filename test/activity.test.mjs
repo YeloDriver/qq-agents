@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { fixture } from "./helpers.mjs";
+import { fixture, listenForFetch } from "./helpers.mjs";
 import { activityPage, homeSummary } from "../src/core/activity.mjs";
 import { createServer } from "../src/server.mjs";
 
@@ -278,7 +278,7 @@ test("the activity API validates the filter", async (t) => {
   seed(f.store.bind("agent-0"));
   const token = randomBytes(32).toString("hex"),
     app_ = createServer({ runtime: f.runtime, token });
-  const port = await app_.listen();
+  const port = await listenForFetch(app_);
   t.after(() => app_.close());
   const get = (q) =>
     fetch(`http://127.0.0.1:${port}/api/activity?${q}`, {

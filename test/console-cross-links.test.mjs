@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture } from "./helpers.mjs";
+import { fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { activityPage } from "../src/core/activity.mjs";
 
@@ -55,7 +55,7 @@ const card = (m, personId, call, evidence) =>
 async function consoleApi(t, f) {
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const request = (route) =>
     fetch(`http://127.0.0.1:${port}${route}`, {

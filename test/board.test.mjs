@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { fixture, context, config } from "./helpers.mjs";
+import { fixture, context, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { Board, boardDay } from "../src/core/board.mjs";
@@ -250,7 +250,7 @@ test("the administrator posts, comments and removes through the console API", as
   const f = setup(t, { dailyPosts: 1 });
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const api = async (path, data) => {
     const r = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -445,7 +445,7 @@ test("the console filters, pins and @s agents through the API", async (t) => {
   const f = setup(t, { dailyPosts: 5 });
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const api = async (path, data) => {
     const r = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -734,7 +734,7 @@ test("the console reacts, filters by tag and sees who retracted", async (t) => {
   const f = setup(t, { tags: ["日常", "通知"] });
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const api = async (path, data) => {
     const r = await fetch(`http://127.0.0.1:${port}${path}`, {

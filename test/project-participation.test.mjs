@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { fixture, context } from "./helpers.mjs";
+import { fixture, context, listenForFetch } from "./helpers.mjs";
 import { FileStore } from "../src/tools/files.mjs";
 import { participateInProject } from "../src/core/project-participation.mjs";
 import { activityVersion, activityForTurn } from "../src/tools/activities.mjs";
@@ -354,7 +354,7 @@ test("participation HTTP writes require admin authentication and preserve reques
   const f = setup(t),
     token = "synthetic-project-admin",
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const input = {
     agentId: "agent-0",

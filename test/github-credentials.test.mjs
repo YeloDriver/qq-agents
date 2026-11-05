@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { fixture } from "./helpers.mjs";
+import { fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { loadGithubCredentials } from "../src/github/credentials.mjs";
 
@@ -20,7 +20,7 @@ test("admin-only GitHub credential entry preserves other secrets and never retur
   );
   const token = randomBytes(32).toString("hex"),
     server = createServer({ runtime: f.runtime, token, githubSecretFile });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(async () => {
     await server.close();
     delete process.env[key];

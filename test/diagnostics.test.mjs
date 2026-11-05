@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { config, fixture } from "./helpers.mjs";
+import { config, fixture, listenForFetch } from "./helpers.mjs";
 import { OneBot } from "../src/transport/onebot.mjs";
 import { createServer } from "../src/server.mjs";
 import { Diagnostics, classifyError } from "../src/core/diagnostics.mjs";
@@ -20,7 +20,7 @@ test("platform login checks retain safe errors through the admin API and diagnos
     throw failure;
   });
   const app = createServer({ runtime: f.runtime, token: "synthetic-admin" });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   for (const [code, status] of [
     ["APP_LOGIN_REQUIRED", 400],
@@ -117,7 +117,7 @@ test("a disk failure returns a classified server error with a safe correlation I
     token: "synthetic-admin",
     allowLive: true,
   });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const next = structuredClone(f.runtime.config);
   next.agents[0].name = "changed";
@@ -266,7 +266,7 @@ test("admin connect against a down gateway answers 503 ONEBOT_UNREACHABLE instea
     token: "synthetic-admin",
     allowLive: true,
   });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const post = (route, body) =>
     fetch(`http://127.0.0.1:${port}${route}`, {

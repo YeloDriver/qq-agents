@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture } from "./helpers.mjs";
+import { fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 // Shared console parts every page builds on: folded sections that remember
@@ -97,7 +97,7 @@ test("the role's known groups and people come named, private chats first", async
 
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const get = (q) =>
     fetch(`http://127.0.0.1:${port}/api/known-targets?${q}`, {

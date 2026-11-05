@@ -11,12 +11,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { createServer } from "../src/server.mjs";
 import { VoiceStore } from "../src/tools/voice.mjs";
 import { wav } from "./audio-fixture.mjs";
-import { fixture, context, disclosureApproval } from "./helpers.mjs";
+import {
+  fixture,
+  context,
+  disclosureApproval,
+  listenForFetch,
+} from "./helpers.mjs";
 async function setup(t, exportOptions) {
   const f = fixture(t),
     token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token, exportOptions });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const base = `http://127.0.0.1:${port}`;
   const request = (url, { auth = true, ...o } = {}) =>
@@ -633,13 +638,16 @@ test(
     );
     t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
     const { request, store, app } = await setup(t, { tempRoot });
-    for (let i = 0; i < 80; i++)
-      store.bind("agent-0").append({
-        dedupe: "stop-" + i,
-        conversation: "group:20000",
-        kind: "message.received",
-        body: "x".repeat(64000),
-      });
+    // Measure shutdown and cleanup, not 80 synchronous fixture commits.
+    store.transaction(() => {
+      for (let i = 0; i < 80; i++)
+        store.bind("agent-0").append({
+          dedupe: "stop-" + i,
+          conversation: "group:20000",
+          kind: "message.received",
+          body: "x".repeat(64000),
+        });
+    });
     const download = request("/api/export?agentId=agent-0")
       .then((res) => res.arrayBuffer())
       .catch(() => {});

@@ -1,3 +1,11 @@
+import { HOME_TOOLS } from "../home/policy.mjs";
+import { HomeService } from "../home/service.mjs";
+import { contextProtection } from "./protected-mind.mjs";
+import {
+  peerQzoneSources,
+  peerQzoneMarker,
+  peerQzoneContext,
+} from "./peer-qzone-protection.mjs";
 import { ownsReactionTarget } from "./reactions.mjs";
 import { GameHost, sensitiveGameMessage } from "../games/framework/host.mjs";
 import { ProtectedWork, isWorkScope } from "./protected-work.mjs";
@@ -122,6 +130,7 @@ export class Runtime {
       const self = this.memory.bind(a.id).identity.initialize(a, this.now());
       this.contexts.upgradeInstructions(a, self);
     }
+    this.home = new HomeService(this);
     this.banter = new BanterCoordinator({
       botIds: this.config.connections.map((c) => c.accountId),
       ...this.config.peerLimit,
@@ -226,6 +235,8 @@ export class Runtime {
       shownSeq: 0,
     };
     ctx.persistTaint = () => {
+      for (const id of peerQzoneSources(this, ctx))
+        ctx.privateRead.add(peerQzoneMarker(id));
       const current = mem.state(conversation);
       if ((current.recallRecovery?.generation || 0) !== recallGeneration)
         return;
@@ -316,8 +327,12 @@ export class Runtime {
     // grants both, and configurations saved before file_read existed get it
     // without an edit.
     if (selected.includes("file_list")) selected.push("file_read");
+    // Revising writes a new text file under the same create permission and
+    // keeps the old one, so it goes with file_create, including older configs.
+    if (selected.includes("file_create")) selected.push("file_revise");
     if (conversation !== SUBJECT && selected.includes("qq_send"))
       selected.push("qq_delivery_status");
+    selected.push(...HOME_TOOLS);
     return [...new Set(selected)].filter(
       (name) =>
         toolAvailable(a, name, conversation) &&
@@ -802,7 +817,7 @@ export class Runtime {
     const before = m.state(conversation);
     if (!before.paused) throw Error("RECOVERY_REQUIRES_PAUSED_CONVERSATION");
     const blocked = (before.disclosureTaint || []).some((id) =>
-      ["operations", "private-repository"].includes(
+      ["operations", "private-repository", "peer-qzone"].includes(
         sourceClass(this, { agentId }, id),
       ),
     );
@@ -873,6 +888,8 @@ export class Runtime {
     const a = this.assertActive(ctx);
     for (const repo of privateGithubSources(ctx, this))
       ctx.privateRead.add(githubMarker(repo));
+    for (const id of peerQzoneSources(this, ctx))
+      ctx.privateRead.add(peerQzoneMarker(id));
     ctx.persistTaint?.();
     if (
       !(ctx.allowedTools || this.toolsFor(a, ctx.conversation)).includes(
@@ -924,6 +941,7 @@ export class Runtime {
           payload: {
             tool: name,
             request: args,
+            ...contextProtection(this, ctx),
             epistemic: "external-source-claim",
             truncated: JSON.stringify(result).length > 20000,
           },
@@ -960,12 +978,16 @@ export class Runtime {
       throw Error("PROTECTED_WORK_OUTBOUND_DENIED");
     for (const repo of privateGithubSources(ctx, this))
       ctx.privateRead.add(githubMarker(repo));
+    for (const id of peerQzoneSources(this, ctx))
+      ctx.privateRead.add(peerQzoneMarker(id));
     ctx.persistTaint?.();
     const ids = [...ctx.privateRead].filter(
       (id) =>
         !ctx.grants.has(id) &&
         (external ||
           /^(operations|operations-result):/.test(id) ||
+          (id.startsWith("peer-qzone:") &&
+            !peerQzoneContext([id.slice(11)], ctx.conversation)) ||
           (id.startsWith("github-private:") &&
             !githubPrivateContext(this.agent(ctx.agentId), ctx.conversation))),
     );

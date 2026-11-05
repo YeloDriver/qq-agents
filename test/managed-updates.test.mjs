@@ -6,7 +6,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { temp, fixture, context } from "./helpers.mjs";
+import { temp, fixture, context, listenForFetch } from "./helpers.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { UpgradeManager } from "../src/updates/manager.mjs";
 import { ReleaseUpdates } from "../src/updates/releases.mjs";
@@ -512,7 +512,7 @@ test("install is an authenticated admin action, bound to the displayed version; 
     },
   };
   const app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const request = (tag, headers) =>
     fetch(`http://127.0.0.1:${port}/api/updates/install`, {

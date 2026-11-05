@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { config, fixture } from "./helpers.mjs";
+import { config, fixture, listenForFetch } from "./helpers.mjs";
 import { validateConfig } from "../src/core/config.mjs";
 import { createServer } from "../src/server.mjs";
 
@@ -157,7 +157,7 @@ async function consoleFor(t, cfg = linkConfig()) {
   const f = fixture(t, { cfg }),
     token = randomBytes(32).toString("hex");
   const server = createServer({ runtime: f.runtime, token, allowLive: true });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   const nodes = new Map();
   const node = (s) => {

@@ -11,6 +11,23 @@ export function safeToolFailure(error) {
       matches: error.matches,
       hint: "No delivery was attempted and this requestId was not reserved. Review the wording against Self's speech samples. Rewrite the rejected message using a new requestId, or confirm it is appropriate by resubmitting the exact same requestId and plain text in this turn. For a stopped burst, preserve earlier receipts: you may resubmit the unchanged burst with its original requestId, or rewrite only the rejected item with qq_send and a new requestId. This reminder grants no sending permission and does not clear any delivery or safety boundary.",
     };
+  // A file ID is a content digest, never content, so returning it lets the
+  // caller reread the right version without exposing anything new.
+  if (
+    /^FILE_REVISION_(CONFLICT|CONTENT_EXISTS)$/.test(error?.message || "") &&
+    /^[a-f0-9]{64}$/.test(error.latestFileId || "")
+  )
+    return {
+      code: error.message,
+      latestFileId: error.latestFileId,
+      ...(Number.isSafeInteger(error.latestVersion)
+        ? { latestVersion: error.latestVersion }
+        : {}),
+      hint:
+        error.message === "FILE_REVISION_CONFLICT"
+          ? "Nothing was written. baseFileId is no longer the newest version of this draft. file_read latestFileId in full, merge your changes into that text, and submit file_revise again with baseFileId set to latestFileId. Never resubmit the old draft over newer work."
+          : "Nothing was written. This exact text is already stored in your library as latestFileId (for example an earlier version), and one file cannot belong to two places in a version chain. Change the text, or use latestFileId as it is.",
+    };
   if (/^ANTIGRAVITY_MEDIA_(FORMAT|LIMIT|FAILED)$/.test(error?.message || ""))
     return {
       code: error.message,
@@ -56,6 +73,22 @@ export function safeToolFailure(error) {
       "No message was sent. Use a registered standard QQ face ID in segments, such as {type:'face',id:'20'} for 偷笑. Do not guess an unknown ID or use a textual [QQ表情：名称] marker as a send command.",
     REACT_ALREADY_ATTEMPTED:
       "This message and face already have a pending or unknown reaction. Do not submit the same reaction with another requestId. Inspect the original delivery receipt; waiting, rewriting the reference or starting another turn does not establish non-delivery.",
+    PROFILE_UPDATE_UNCONFIRMED:
+      "An earlier change of this profile field is still pending or unknown and may already be visible. Do not submit it again with another requestId; the administrator reconciles it in the console.",
+    PROFILE_ORDINARY_TURN_REQUIRED:
+      "Profile changes are only available in your own free time or an ordinary reply turn of the owner's private chat, not while carrying out a proactive intent or scheduled task. Nothing was changed.",
+    QZONE_POST_UNCONFIRMED:
+      "An earlier QQ Zone post is still pending or unknown and may already be public. Do not post again with another requestId; the administrator reconciles it in the console.",
+    QZONE_ORDINARY_TURN_REQUIRED:
+      "QQ Zone is only available in your own free time or an ordinary reply turn of the owner's private chat, not while carrying out a proactive intent or scheduled task. Nothing was posted.",
+    QZONE_UNSUPPORTED:
+      "The gateway cannot provide QQ Zone access. Nothing was posted. Do not retry with another requestId.",
+    QZONE_LOGIN_REQUIRED:
+      "QQ Zone did not accept the account's web login, so nothing was posted or read. Tell the owner the QQ login may need refreshing; do not retry right away.",
+    QZONE_REJECTED:
+      "QQ Zone refused the request, possibly as risk control or a temporary limit. Nothing was posted. Do not retry right away or with another requestId.",
+    PROFILE_UNSUPPORTED:
+      "The gateway does not support this profile action. Nothing was confirmed. Do not retry with another field or requestId to work around it.",
     REACT_UNSUPPORTED:
       "The gateway does not support this reaction action. No reaction was confirmed. Do not retry another message, face or requestId to work around missing gateway support.",
     INVALID_MEMORY_SCOPE:

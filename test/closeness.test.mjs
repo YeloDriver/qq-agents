@@ -11,7 +11,7 @@ import {
   INTERACTION_DAY as DAY,
   INTERACTION_CACHE_MS,
 } from "../src/core/closeness.mjs";
-import { fixture, context, temp } from "./helpers.mjs";
+import { fixture, context, temp, listenForFetch } from "./helpers.mjs";
 import { personCardsForTurn } from "../src/core/person-cards.mjs";
 import { subjectMaterials } from "../src/core/subject-materials.mjs";
 import { createServer } from "../src/server.mjs";
@@ -451,7 +451,7 @@ test("console edits statements with CAS and shows facts; QQ output and Self neve
   card(memory);
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime, token }),
-    port = await app.listen();
+    port = await listenForFetch(app);
   t.after(() => app.close());
   const request = (body) =>
     fetch(`http://127.0.0.1:${port}/api/person-card`, {

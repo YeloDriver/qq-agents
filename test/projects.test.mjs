@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { fixture, context, config } from "./helpers.mjs";
+import { fixture, context, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { FileStore } from "../src/tools/files.mjs";
 import { FILE_TOOL_NAMES } from "../src/tools/file-tools.mjs";
@@ -219,7 +219,7 @@ test("projects travel with an export, and the console lists them read-only", asy
     );
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const data = await (
     await fetch(`http://127.0.0.1:${port}/api/mind?agentId=agent-0`, {

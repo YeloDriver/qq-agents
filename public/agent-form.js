@@ -33,6 +33,14 @@ const AGENT_TOOL_GROUPS = [
       qq_send_poke: "拍一拍",
       qq_react: "给消息贴表情回应",
       qq_recall: "撤回自己刚发的消息",
+      qq_group_info_read: "查看当前群概况、群主和管理员摘要",
+      qq_group_members_read: "分页读取当前群成员名册",
+      qq_peer_profile_read: "读取当前聊天对象的 QQ 基本资料",
+      qq_profile_read: "查看自己的 QQ 资料",
+      qq_profile_update: "修改自己的昵称、签名或头像",
+      qq_peer_qzone_read: "读取当前聊天对象的 QQ 空间说说（实验）",
+      qzone_read: "查看自己最近的 QQ 空间说说",
+      qzone_post: "发 QQ 空间说说（实验）",
       qq_forward_read: "展开合并转发",
       qq_forward_send: "发送合并转发",
       qq_cross_group_query: "查询已授权的跨群统计",
@@ -90,6 +98,7 @@ const AGENT_TOOL_GROUPS = [
       file_read: "读取文本文件",
       file_download: "下载文件",
       file_create: "生成文本文件",
+      file_revise: "修订文本稿（保留旧版）",
       file_import: "从指定目录导入",
       qq_send_file: "发送文件",
     },
@@ -183,6 +192,22 @@ const AGENT_TOOL_GROUPS = [
       framework_read: "阅读框架文档与源码",
       deployment_info: "查看本机版本与后端",
       diagnostics_read: "查看自身运行诊断",
+    },
+  },
+  {
+    id: "home",
+    builtin: true,
+    builtinLabel: "由本角色的小窝开关控制",
+    title: "纸页小窝",
+    desc: "默认关闭。启用后所有会话可读自己的展示，只有主人格可布置；文字发布需要另开发布开关。",
+    tools: {
+      room_read: "读取自己的展示",
+      room_scene_read: "读取房间与公共布局",
+      room_scene_patch: "主人格布置",
+      room_scene_undo: "主人格撤销布置",
+      room_publish: "主人格发布文字",
+      room_retract: "主人格撤回文字",
+      room_operation_status: "查询历史操作回执",
     },
   },
   {
@@ -465,6 +490,81 @@ const agentForm = {
       ) +
       advanced(
         this.foldTitle(
+          "读取当前群资料与名册",
+          row.behavior?.actions?.groupRead ? "已开启" : "已关闭",
+        ),
+        '<input type="hidden" name="groupReadPresent" value="1">' +
+          check(
+            "groupReadEnabled",
+            "允许读取当前群概况和分页成员名册",
+            row.behavior?.actions?.groupRead,
+          ) +
+          '<p class="hint">默认关闭，还需允许对应聊天工具。只在当前群使用，不能填写其他群号；不改群资料、不授予应用管理权限、不增加回复额度。每页独立实时查询，名册可能变化；单成员详情用基本资料工具。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "读取当前聊天对象的 QQ 基本资料",
+          row.behavior?.actions?.peerProfile ? "已开启" : "已关闭",
+        ),
+        '<input type="hidden" name="peerProfilePresent" value="1">' +
+          check(
+            "peerProfileEnabled",
+            "允许读取当前私聊对象和当前群成员的基本资料",
+            row.behavior?.actions?.peerProfile,
+          ) +
+          '<p class="hint">还需允许同名聊天工具；仅返回昵称、签名、群名片和群内身份，不支持任意他人或空闲主体查询。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "修改自己的 QQ 资料",
+          row.behavior?.actions?.profile ? "已开启" : "已关闭",
+        ),
+        check(
+          "profileEnabled",
+          "允许修改自己的昵称、签名和头像",
+          row.behavior?.actions?.profile,
+        ) +
+          range(
+            "profileMaxPerDay",
+            "每天最多修改",
+            row.behavior?.actions?.profileMaxPerDay ?? 3,
+            { min: 1, max: 20, step: 1, unit: "次" },
+          ) +
+          '<p class="hint">默认关闭，还需在“聊天发言”里允许资料工具。只在主人私聊的普通回合和角色自己的空闲时间可用；头像只能用自己图片库里的图片。资料所有人可见，计入总发送限速；失败或未知结果不自动重试。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "读取聊天对象的 QQ 空间（实验）",
+          row.behavior?.actions?.peerQzone ? "已开启" : "已关闭",
+        ),
+        '<input type="hidden" name="peerQzonePresent" value="1">' +
+          check(
+            "peerQzoneEnabled",
+            "允许读取当前私聊对象或当前群成员的最近说说",
+            row.behavior?.actions?.peerQzone,
+          ) +
+          '<p class="hint">默认关闭，还需在聊天发言中允许 qq_peer_qzone_read。仅文字、时间、图片数和评论数；不读取评论或图片内容。好友可见资料不是群公开资料。在群里读取会使该模型会话后续回复持续受披露限制，重启与新回合也不会自动解除，外发需要管理员批准。空间网页接口可能失效或触发风控；读取不授予回复额度。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
+          "发 QQ 空间说说（实验）",
+          row.behavior?.actions?.qzone ? "已开启" : "已关闭",
+        ),
+        check(
+          "qzoneEnabled",
+          "允许读取和发布自己的 QQ 空间说说",
+          row.behavior?.actions?.qzone,
+        ) +
+          range(
+            "qzoneMaxPerDay",
+            "每天最多发",
+            row.behavior?.actions?.qzoneMaxPerDay ?? 2,
+            { min: 1, max: 10, step: 1, unit: "条" },
+          ) +
+          '<p class="hint">实验功能，默认关闭，还需在“聊天发言”里允许说说工具。NapCat 没有正式接口，借 QQ 登录 cookie 调用 QQ 空间网页接口，可能随时失效或触发账号风控。只在主人私聊的普通回合和角色自己的空闲时间可用（空闲时遵守安静时段），只发所有人可见的纯文字；计入总发送限速，失败或未知结果不自动重试。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
           "别处近况",
           row.behavior?.elsewhere?.enabled === false
             ? "已关闭"
@@ -616,6 +716,30 @@ const agentForm = {
             "定时静默（JSON：start、end、days 0—6、timezone；起止相同须 allDay:true，00:00 表示日历整日）",
             JSON.stringify(row.silence, null, 2),
           )}</details>`,
+      ) +
+      advanced(
+        this.foldTitle(
+          "纸页小窝",
+          row.home?.enabled
+            ? row.home.publishing
+              ? "布置与文字发布已开启"
+              : "仅布置与读取"
+            : "已关闭",
+        ),
+        '<input type="hidden" name="homeSettingsShown" value="1">' +
+          check("homeEnabled", "启用小窝读取和主人格布置", row.home?.enabled) +
+          check(
+            "homePublishing",
+            "允许主人格主动发布文字",
+            row.home?.publishing,
+          ) +
+          input(
+            "homeMaxWrites",
+            "每天最多布置或发布次数（UTC）",
+            row.home?.maxWritesPerDay ?? 20,
+            'type="number" min="1" max="100"',
+          ) +
+          '<p class="hint">仅向实例管理员及房主自己的会话展示；其他会话只读，公共空间仍由管理员布置。关闭会隐藏展示文字，不自动撤回；管理员可在小窝面板隐藏内容。撤回不占发布额度。启用不唤醒角色，也不发送 QQ 消息。</p>',
       ) +
       advanced(
         this.foldTitle(
@@ -801,9 +925,11 @@ const agentForm = {
 
   toolGroupsMarkup(row) {
     const enabled = new Set(row.tools);
-    // The server grants file_read with file_list, also to configurations
-    // saved before file_read existed (Runtime.toolsFor).
+    // The server grants file_read with file_list and file_revise with
+    // file_create, also to configurations saved before they existed
+    // (Runtime.toolsFor).
     if (enabled.has("file_list")) enabled.add("file_read");
+    if (enabled.has("file_create")) enabled.add("file_revise");
     const known = new Set(
       AGENT_TOOL_GROUPS.flatMap((g) => Object.keys(g.tools)),
     );
@@ -1185,6 +1311,33 @@ const agentForm = {
             Number,
             original.behavior?.actions?.recallMaxPerHour,
           ),
+          groupRead: f.has("groupReadPresent")
+            ? f.has("groupReadEnabled")
+            : original.behavior?.actions?.groupRead,
+          peerProfile: f.has("peerProfilePresent")
+            ? f.has("peerProfileEnabled")
+            : original.behavior?.actions?.peerProfile,
+          profile: f.has("profileMaxPerDay")
+            ? f.has("profileEnabled")
+            : original.behavior?.actions?.profile,
+          profileMaxPerDay: edited(
+            "profileMaxPerDay",
+            original.behavior?.actions?.profileMaxPerDay ?? 3,
+            Number,
+            original.behavior?.actions?.profileMaxPerDay,
+          ),
+          peerQzone: f.has("peerQzonePresent")
+            ? f.has("peerQzoneEnabled")
+            : original.behavior?.actions?.peerQzone,
+          qzone: f.has("qzoneMaxPerDay")
+            ? f.has("qzoneEnabled")
+            : original.behavior?.actions?.qzone,
+          qzoneMaxPerDay: edited(
+            "qzoneMaxPerDay",
+            original.behavior?.actions?.qzoneMaxPerDay ?? 2,
+            Number,
+            original.behavior?.actions?.qzoneMaxPerDay,
+          ),
         },
         // A form without these fields keeps the stored switch and window.
         elsewhere: {
@@ -1297,6 +1450,17 @@ const agentForm = {
           ),
         },
       },
+      ...(f.has("homeSettingsShown")
+        ? {
+            home: {
+              enabled: f.has("homeEnabled"),
+              publishing: f.has("homePublishing"),
+              maxWritesPerDay: Number(
+                get("homeMaxWrites") || original.home?.maxWritesPerDay || 20,
+              ),
+            },
+          }
+        : {}),
       github: {
         ...original.github,
         enabled: f.has("githubEnabled"),

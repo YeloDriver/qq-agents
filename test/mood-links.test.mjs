@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture, config, context, temp } from "./helpers.mjs";
+import { fixture, config, context, temp, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { exportToFile } from "../src/memory/export.mjs";
@@ -360,7 +360,7 @@ test("the console links moods and person cards both ways, read-only", async (t) 
 
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const api = async (route) =>
     (

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture, config } from "./helpers.mjs";
+import { fixture, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { ConfigStore } from "../src/core/config.mjs";
 
@@ -28,7 +28,7 @@ function pendingTurn(t) {
 async function httpConfig(t, f) {
   const token = randomBytes(32).toString("hex");
   const server = createServer({ runtime: f.runtime, token, allowLive: true });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   return (url, options = {}) =>
     fetch(`http://127.0.0.1:${port}${url}`, {

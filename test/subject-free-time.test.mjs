@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { fixture, config, settle } from "./helpers.mjs";
+import { fixture, config, settle, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { configImpact } from "../src/core/config-impact.mjs";
 
@@ -175,7 +175,7 @@ test("console shows the free-time log and 24-hour activity", async (t) => {
   await f.runtime.wake("agent-0", "@subject");
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const data = await (
     await fetch(`http://127.0.0.1:${port}/api/mind?agentId=agent-0`, {

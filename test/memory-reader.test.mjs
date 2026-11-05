@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture } from "./helpers.mjs";
+import { fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 async function setup(t) {
   const f = fixture(t),
     token = randomBytes(32).toString("hex");
   const server = createServer({ runtime: f.runtime, token });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   const request = (url) =>
     fetch(`http://127.0.0.1:${port}${url}`, {

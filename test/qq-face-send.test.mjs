@@ -277,6 +277,24 @@ test("burst prevalidates every item before sending any earlier valid message", a
   assert.equal(f.mem.delivery("invalid-later-length:0"), undefined);
 });
 
+test("burst rejects normalized empty text before any delivery or receipt reservation", async (t) => {
+  const f = setup(t);
+  for (const [index, text] of ["   ", "```\n```"].entries()) {
+    const requestId = `empty-later-${index}`;
+    await assert.rejects(
+      f.runtime.callTool(f.ctx, "qq_send_burst", {
+        requestId,
+        messages: ["占位有效", text],
+        gapMs: 0,
+      }),
+      /EMPTY_MESSAGE/,
+    );
+    assert.equal(f.transport.sent.length, 0);
+    assert.equal(f.mem.delivery(`${requestId}:0`), undefined);
+    assert.equal(f.mem.delivery(`${requestId}:1`), undefined);
+  }
+});
+
 test("permission, pause, and per-turn budget still gate structured sends", async (t) => {
   const disabled = setup(t);
   disabled.runtime.config.agents[0].tools =

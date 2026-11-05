@@ -9,7 +9,7 @@ import {
   readRelease,
 } from "../src/updates/releases.mjs";
 import { createServer } from "../src/server.mjs";
-import { temp, fixture, context } from "./helpers.mjs";
+import { temp, fixture, context, listenForFetch } from "./helpers.mjs";
 
 const release = (extra = {}) => ({
   tag_name: "v0.6.0",
@@ -209,7 +209,7 @@ test("update routes require administrator credentials; model capabilities cannot
     token = "synthetic-admin";
   f.runtime.updates = updates(t);
   const app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const capability = context(f.runtime).token;
   for (const [route, method, body] of [

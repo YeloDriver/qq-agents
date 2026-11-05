@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixture, context } from "./helpers.mjs";
+import { fixture, context, listenForFetch } from "./helpers.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { restoreExport } from "../src/memory/migrate.mjs";
 import { activityForTurn } from "../src/tools/activities.mjs";
@@ -225,7 +225,7 @@ test("console reads activity versions through an authenticated endpoint", async 
     p = await f.call("project", f.start),
     token = "test-activity-admin";
   const server = createServer({ runtime: f.runtime, token });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   const url = `http://127.0.0.1:${port}/api/project?agentId=agent-0&id=${p.id}&revision=1`;
   assert.equal((await fetch(url)).status, 401);

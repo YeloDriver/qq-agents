@@ -1,12 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { config, fixture, context, FakeTransport } from "./helpers.mjs";
 import { toolSpecs } from "../src/tools/index.mjs";
 import { mcpEntrySpecs, scopedCatalog } from "../src/tools/catalog.mjs";
-import { identityAnchors, stableInstructions } from "../src/core/prompts.mjs";
+import { stableInstructions } from "../src/core/prompts.mjs";
 
-test("QQ delivery and style rules reach both chat scopes without worked examples or subject send instructions", async (t) => {
+test("QQ chats use upstream instructions without the removed fork style and delivery policy", async (t) => {
   for (const type of ["codex", "dsh"]) {
     const cfg = config(1),
       captured = [];
@@ -20,50 +19,58 @@ test("QQ delivery and style rules reach both chat scopes without worked examples
     for (const scope of ["private:30000", "group:20000", "@subject"])
       await runtime.wake("agent-0", scope);
     assert.equal(captured.length, 3);
-    for (const p of captured.slice(0, 2)) {
-      assert.match(p.instructions, /简单闲聊不用列表、教程或总结升华/);
-      assert.match(p.instructions, /专业问题、复杂推理或明确要求可以充分展开/);
-      assert.match(p.instructions, /不脑补动机/);
-      assert.match(p.instructions, /保留自然的主谓和必要衔接/);
-      assert.match(p.instructions, /不机械添加助词/);
-      assert.match(p.instructions, /仍可只说“嗯”“晚安”/);
-      assert.match(p.instructions, /疑问和感叹正常使用问号、感叹号/);
+    for (const p of captured) {
       assert.doesNotMatch(
         p.instructions,
-        /自然口语\/过度精简正误对照|以下占位情境|对方.*；过度精简/,
+        /客观自然准则|QQ 投递协议|保留自然的主谓|不压成电报式片段/,
       );
-      assert.match(p.instructions, /【QQ 投递协议】决定在当前 QQ 聊天回复时/);
-      assert.match(
-        p.instructions,
-        /本回合已启用的 qq_send 或 qq_send_burst 投递正文/,
-      );
-      assert.match(p.instructions, /自然表达规则用于工具参数中的正文/);
-      assert.match(p.instructions, /仍可选择不回复/);
-      assert(
-        p.instructions.indexOf("【QQ 投递协议】") <
-          p.instructions.indexOf("当前 self v"),
-      );
-      assert.match(
-        p.instructions,
-        /能力和工具是否可用以当前工具目录与实际结果为准/,
-      );
+    }
+    for (const p of captured.slice(0, 2)) {
+      assert.match(p.instructions, /QQ 聊天按当前 Self 的说话样本表达/);
       assert.match(p.instructions, /普通 assistant 文本不会/);
-      assert.match(p.instructions, /暂停、权限、限额和幂等账本/);
       assert.deepEqual(
         p.tools.find((tool) => tool.name === "qq_send"),
         toolSpecs(["qq_send"])[0],
       );
-      if (type === "dsh") {
-        assert.match(p.instructions, /bridge_tools/);
-        assert.match(p.instructions, /bridge_call/);
-        assert.match(p.instructions, /发现结果不是授权/);
-      } else assert.match(p.instructions, /参数以 schema 为准/);
     }
-    const subject = captured[2];
-    assert.doesNotMatch(subject.instructions, /客观自然准则|QQ 投递协议/);
-    assert.match(subject.instructions, /subject_log/);
-    assert(!subject.tools.some((tool) => tool.name === "qq_send"));
+    assert(!captured[2].tools.some((tool) => tool.name === "qq_send"));
   }
+});
+
+test("removing fork chat instructions retires the old session once and preserves Self", async (t) => {
+  const { createHash } = await import("node:crypto"),
+    cfg = config(1),
+    captured = [];
+  cfg.agents[0].contextPolicy.capacityTokens = 65536;
+  const { runtime, store } = fixture(t, {
+    cfg,
+    run: async (p) => {
+      captured.push(p);
+      p.saveSession({ id: "upstream-chat", backend: "fixture" });
+    },
+  });
+  const scope = "private:30000",
+    memory = store.bind("agent-0");
+  await runtime.wake("agent-0", scope);
+  const self = memory.identity.current(),
+    state = memory.state(scope);
+  // Model contexts retain their old fixed text until the next safe handoff.
+  const old =
+    captured[0].instructions +
+    "\n\n【客观自然准则（QQ 聊天）】\n【QQ 投递协议】";
+  memory.setState(scope, {
+    ...state,
+    loadedInstructionsHash: createHash("sha256").update(old).digest("hex"),
+  });
+  await runtime.wake("agent-0", scope);
+  await runtime.wake("agent-0", scope);
+  assert.equal(captured[1].session, null);
+  assert.equal(captured[2].session.id, "upstream-chat");
+  assert.doesNotMatch(captured[1].instructions, /客观自然准则|QQ 投递协议/);
+  assert.deepEqual(memory.identity.current(), self);
+  const history = memory.identity.list("session_history");
+  assert.equal(history.length, 1);
+  assert.equal(history[0].reason, "identity-or-protocol-change");
 });
 
 test("QQ face send syntax is documented only for enabled tools and distinguishes inbound annotations", (t) => {
@@ -101,124 +108,6 @@ test("QQ face send syntax is documented only for enabled tools and distinguishes
   assert.match(sendSpec.description, /segments/);
   assert.match(sendSpec.description, /20[^\n]*偷笑|偷笑[^\n]*20/);
   assert.match(burstSpec.description, /segments/);
-});
-
-test("QQ style is absent from protected work and other internal instruction scopes", (t) => {
-  const { runtime, store } = fixture(t, { cfg: config(1) });
-  const a = runtime.agent("agent-0"),
-    self = store.bind(a.id).identity.current();
-  for (const scope of [
-    "@subject",
-    "@work",
-    "@work:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "@operations",
-    "privateish:30000",
-    "",
-  ]) {
-    const contract = runtime.contexts.instructionContract(a, scope, self, [
-      "framework_read",
-    ]);
-    assert.doesNotMatch(contract.instructions, /客观自然准则|QQ 投递协议/);
-    assert.match(contract.instructions, /deployment_info、diagnostics_read/);
-    assert.match(contract.instructions, /参数以 schema 为准/);
-  }
-});
-
-test("a chat with the previous style-free instruction digest rebuilds before adopting the new style", async (t) => {
-  const cfg = config(1),
-    captured = [];
-  cfg.agents[0].contextPolicy.capacityTokens = 65536;
-  const { runtime, store } = fixture(t, {
-    cfg,
-    run: async (p) => {
-      captured.push(p);
-      p.saveSession({ id: "style-fixture", backend: "fixture" });
-    },
-  });
-  const scope = "private:30000";
-  await runtime.wake("agent-0", scope);
-  const a = runtime.agent("agent-0"),
-    memory = store.bind(a.id),
-    self = memory.identity.current(),
-    identity = identityAnchors(runtime.config, a);
-  // Omitting the scope recreates the exact pre-style fixed instruction text.
-  const previous = stableInstructions(
-    a,
-    self,
-    false,
-    memory.identity.anchors(a),
-    {
-      backendType: "codex",
-      toolNames: runtime.toolsFor(a, scope),
-      identity: {
-        self: identity.self,
-        administrators: identity.administrators,
-      },
-      dynamicPeers: true,
-    },
-  );
-  assert.doesNotMatch(previous, /客观自然准则/);
-  const previousHash = createHash("sha256").update(previous).digest("hex");
-  memory.setState(scope, {
-    ...memory.state(scope),
-    loadedInstructionsHash: previousHash,
-  });
-  runtime.contexts.upgradeInstructions(a, self);
-  assert.equal(memory.state(scope).loadedInstructionsHash, previousHash);
-  await runtime.wake(a.id, scope);
-  assert.equal(captured[1].session, null);
-  assert.match(captured[1].instructions, /客观自然准则/);
-  assert.equal(memory.identity.current().version, self.version);
-  const history = memory.identity.list("session_history");
-  assert.equal(history.length, 1);
-  assert.equal(history[0].reason, "identity-or-protocol-change");
-});
-
-test("chat delivery rules replace the previous worked examples with one safe session retirement", async (t) => {
-  const cfg = config(1),
-    captured = [];
-  cfg.agents[0].contextPolicy.capacityTokens = 65536;
-  const { runtime, store } = fixture(t, {
-    cfg,
-    run: async (p) => {
-      captured.push(p);
-      p.saveSession({ id: `delivery-${captured.length}`, backend: "fixture" });
-    },
-  });
-  const scope = "private:30000",
-    memory = store.bind("agent-0");
-  await runtime.wake("agent-0", scope);
-  const originalSelf = memory.identity.current(),
-    previousStyle = [
-      "【自然口语/过度精简正误对照】",
-      "日常口语保留自然的主谓和必要衔接，把话说完整，不压成电报式片段，也不机械添加助词。该短时仍可只说“嗯”“晚安”；短消息末尾没有必要就不加句号，疑问和感叹正常使用问号、感叹号。以下占位情境只演示完整自然的表达，不是固定话术，也不要求每次加长回复：",
-      "对方说明天降温：自然“那明天出门多穿点，别冻着了”；过度精简“降温，多穿”",
-      "对方下雨时没带伞：自然“那你先找个地方躲一下，等雨小了再走”；过度精简“找地躲雨，雨小再走”",
-      "对方说忙完了：自然“忙完了？那现在能歇会儿了”；过度精简“忙完？可歇”",
-      "对方说面煮得太软：自然“下次早点捞出来试试，应该会好一点”；过度精简“煮软，下次早捞”",
-    ].join("\n"),
-    previous = captured[0].instructions
-      .replace(/【QQ 投递协议】[^\n]+\n\n/, "")
-      .replace(/日常口语保留[^\n]+/, previousStyle),
-    previousHash = createHash("sha256").update(previous).digest("hex");
-  assert.doesNotMatch(previous, /QQ 投递协议/);
-  assert.match(previous, /自然口语\/过度精简正误对照/);
-  memory.setState(scope, {
-    ...memory.state(scope),
-    loadedInstructionsHash: previousHash,
-  });
-  runtime.contexts.upgradeInstructions(runtime.agent("agent-0"), originalSelf);
-  assert.equal(memory.state(scope).loadedInstructionsHash, previousHash);
-  await runtime.wake("agent-0", scope);
-  assert.equal(captured[1].session, null);
-  assert.match(captured[1].instructions, /QQ 投递协议/);
-  assert.doesNotMatch(captured[1].instructions, /正误对照|对方.*；过度精简/);
-  await runtime.wake("agent-0", scope);
-  assert.equal(captured[2].session.id, "delivery-2");
-  assert.deepEqual(memory.identity.current(), originalSelf);
-  const history = memory.identity.list("session_history");
-  assert.equal(history.length, 1);
-  assert.equal(history[0].reason, "identity-or-protocol-change");
 });
 
 test("Self and own accounts stay fixed while peer accounts refresh without rebuilding", async (t) => {
@@ -570,4 +459,21 @@ test("silence follows reaction configuration and the currently offered read tool
     { toolNames: ["qq_mark_read"] },
   );
   assert.match(withRead, /读完后可以用 qq_mark_read/);
+});
+
+test("image placeholder hint follows whether qq_image_read is actually offered", async (t) => {
+  const hint = /qq_image_read 带这条消息的经历 id 读取/;
+  for (const offered of [false, true]) {
+    const cfg = config(1),
+      captured = [];
+    if (offered) cfg.agents[0].tools.push("qq_image_read");
+    const { runtime } = fixture(t, { cfg, run: async (p) => captured.push(p) });
+    await runtime.wake("agent-0", "group:20000");
+    assert.equal(
+      captured[0].tools.some((x) => x.name === "qq_image_read"),
+      offered,
+    );
+    if (offered) assert.match(captured[0].instructions, hint);
+    else assert.doesNotMatch(captured[0].instructions, hint);
+  }
 });

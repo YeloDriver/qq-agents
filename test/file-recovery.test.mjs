@@ -7,7 +7,14 @@ import { FileStore } from "../src/tools/files.mjs";
 import { FILE_TOOL_NAMES } from "../src/tools/file-tools.mjs";
 import { filesSchema } from "../src/core/policy.mjs";
 import { createServer } from "../src/server.mjs";
-import { temp, config, fixture, context, fileSymlinkTest } from "./helpers.mjs";
+import {
+  temp,
+  config,
+  fixture,
+  context,
+  fileSymlinkTest,
+  listenForFetch,
+} from "./helpers.mjs";
 
 test("metadata growth is rejected before a healthy file becomes unreadable", (t) => {
   const store = new FileStore(temp(t)),
@@ -87,7 +94,7 @@ test("admin repair is authenticated, role-scoped, and keeps repaired protected f
   );
   const token = randomBytes(32).toString("hex"),
     server = createServer({ runtime: f.runtime, token });
-  const port = await server.listen();
+  const port = await listenForFetch(server);
   t.after(() => server.close());
   const request = (route, body, auth = token) =>
     fetch(`http://127.0.0.1:${port}${route}`, {

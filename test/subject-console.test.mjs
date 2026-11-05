@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture, config, settle } from "./helpers.mjs";
+import { fixture, config, settle, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 async function consoleFixture(t, options) {
   const f = fixture(t, options),
     token = randomBytes(32).toString("hex");
   const app = createServer({ runtime: f.runtime, token, allowLive: true });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const api = async (route, data, method = "POST") => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {

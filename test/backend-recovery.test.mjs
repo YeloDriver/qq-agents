@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixture, config } from "./helpers.mjs";
+import { fixture, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 async function setup(t, live = true) {
@@ -13,7 +13,7 @@ async function setup(t, live = true) {
     token: "test-admin",
     allowLive: live,
   });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const request = async (body, auth = true) => {
     const r = await fetch(`http://127.0.0.1:${port}/api/backend`, {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { fixture, config } from "./helpers.mjs";
+import { fixture, config, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 
 // The role pages read like the home page: what the page is for comes first,
@@ -27,7 +27,7 @@ async function consoleFixture(t, cfg = config(2)) {
   const f = fixture(t, { cfg }),
     token = randomBytes(32).toString("hex");
   const app = createServer({ runtime: f.runtime, token, allowLive: true });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   // The console's own fetch, with the admin token it would have after login.
   const request = (route, options = {}) =>

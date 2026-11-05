@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { fixture, config, context } from "./helpers.mjs";
+import { fixture, config, context, listenForFetch } from "./helpers.mjs";
 import { safeToolFailure } from "../src/tools/errors.mjs";
 import { createServer } from "../src/server.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
@@ -265,7 +265,7 @@ test("the console shows the mood history and cannot change it", async (t) => {
   );
   const token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const mind = await (
     await fetch(`http://127.0.0.1:${port}/api/mind?agentId=agent-0`, {

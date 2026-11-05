@@ -1,5 +1,7 @@
+import { HOME_READ_TOOLS, HOME_TOOLS } from "../home/policy.mjs";
 import { z } from "zod";
 import { toolSpecs } from "./specs.mjs";
+import { profileConversation } from "../core/profile.mjs";
 
 export const discoveryInput = z
   .object({
@@ -65,10 +67,42 @@ export function scopedCatalog(runtime, ctx, input) {
 }
 
 export function toolAvailable(agent, name, conversation) {
+  if (HOME_TOOLS.includes(name))
+    return (
+      agent.home?.enabled === true &&
+      (HOME_READ_TOOLS.includes(name) ||
+        (conversation === "@subject" &&
+          (name !== "room_publish" || agent.home.publishing === true)))
+    );
   if (name === "qq_react")
     return (
       agent.behavior.actions?.react === true &&
       /^(private|group):/.test(conversation)
+    );
+  if (name === "qq_group_info_read" || name === "qq_group_members_read")
+    return (
+      agent.behavior?.actions?.groupRead === true &&
+      /^group:[1-9]\d{0,19}$/.test(conversation)
+    );
+  if (name === "qq_peer_profile_read")
+    return (
+      agent.behavior?.actions?.peerProfile === true &&
+      /^(private|group):/.test(conversation)
+    );
+  if (name === "qq_profile_read" || name === "qq_profile_update")
+    return (
+      agent.behavior?.actions?.profile === true &&
+      profileConversation(agent, conversation)
+    );
+  if (name === "qq_peer_qzone_read")
+    return (
+      agent.behavior?.actions?.peerQzone === true &&
+      /^(private|group):[1-9]\d{4,19}$/.test(conversation)
+    );
+  if (name === "qzone_read" || name === "qzone_post")
+    return (
+      agent.behavior?.actions?.qzone === true &&
+      profileConversation(agent, conversation)
     );
   if (name === "qq_recall")
     return (

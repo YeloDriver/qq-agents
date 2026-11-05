@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { randomBytes } from "node:crypto";
-import { config as makeConfig, fixture } from "./helpers.mjs";
+import { config as makeConfig, fixture, listenForFetch } from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { appService } from "../src/apps/tools.mjs";
 import { appsPolicySchema } from "../src/apps/policy.mjs";
@@ -691,7 +691,7 @@ test("the browse page's reads are the last day's spent reads", async (t) => {
   const f = fixture(t),
     token = randomBytes(32).toString("hex"),
     app = createServer({ runtime: f.runtime, token });
-  const port = await app.listen();
+  const port = await listenForFetch(app);
   t.after(() => app.close());
   const reads = async () =>
     (

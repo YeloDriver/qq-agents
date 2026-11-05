@@ -1,3 +1,4 @@
+import { readGroupGateway } from "./group-read.mjs";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { attachmentName } from "./attachments.mjs";
@@ -142,6 +143,86 @@ export function normalizeEvent(raw, connection) {
   };
 }
 
+// Gateway actions whose missing support is reported as unsupported
+// rather than as an opaque failure.
+const actionUnsupportedChecks = new Set([
+  "delete_msg",
+  "set_msg_emoji_like",
+  "set_qq_profile",
+  "set_self_longnick",
+  "set_qq_avatar",
+  "get_cookies",
+  "get_group_info",
+  "get_group_member_list",
+]);
+
+const QZONE_ORIGIN = "https://user.qzone.qq.com";
+const QZONE_MAX_BYTES = 256 * 1024;
+
+/** QQ Zone's CSRF token: the page's own hash of the login key.
+ * @param {string} key
+ */
+export function qzoneToken(key) {
+  let hash = 5381;
+  for (const char of key) hash += (hash << 5) + char.charCodeAt(0);
+  return hash & 0x7fffffff;
+}
+
+/** The endpoints answer JSON, or JSON wrapped in a JSONP callback.
+ * @param {string} text
+ */
+function qzoneBody(text) {
+  const trimmed = text.trim();
+  const wrapped = /^[\w.]+\(([\s\S]*)\)\s*;?$/.exec(trimmed);
+  try {
+    const body = JSON.parse(wrapped ? wrapped[1] : trimmed);
+    return body && typeof body === "object" ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A status the endpoint actually stated; anything else is not a verdict.
+ * @param {unknown} value
+ */
+function qzoneStatus(value) {
+  return typeof value === "number" && Number.isInteger(value)
+    ? value
+    : typeof value === "string" && /^-?\d+$/.test(value)
+      ? Number(value)
+      : null;
+}
+
+/** @param {any} body */
+function qzoneRejection(body) {
+  const error = Error("ONEBOT_REJECTED");
+  // Only classify; the raw message is never kept.
+  const detail = String(body?.message ?? body?.msg ?? "");
+  error.reason =
+    [-3000, -4001].includes(Number(body?.code)) ||
+    [-3000, -4001].includes(Number(body?.subcode)) ||
+    /登录|login/i.test(detail)
+      ? "QZONE_LOGIN_REQUIRED"
+      : "QZONE_REJECTED";
+  return error;
+}
+
+const peerQzoneReasons = new Set([
+  "ACTION_UNSUPPORTED",
+  "QZONE_LOGIN_REQUIRED",
+  "QZONE_ACCESS_DENIED",
+  "QZONE_RATE_LIMITED",
+  "QZONE_RESPONSE_UNREADABLE",
+  "QZONE_TARGET_MISMATCH",
+  "QQ_ACCOUNT_MISMATCH",
+  "QZONE_REJECTED",
+]);
+function peerQzoneFailure(reason) {
+  const error = Error("ONEBOT_REJECTED");
+  error.reason = peerQzoneReasons.has(reason) ? reason : "QZONE_READ_FAILED";
+  return error;
+}
+
 export class OneBot extends EventEmitter {
   constructor(config, { fetchImpl = fetch, WebSocketImpl = WebSocket } = {}) {
     super();
@@ -194,10 +275,7 @@ export class OneBot extends EventEmitter {
       throw Error("ONEBOT_UNREACHABLE", { cause });
     }
     if (!response.ok) {
-      if (
-        ["delete_msg", "set_msg_emoji_like"].includes(action) &&
-        response.status === 404
-      ) {
+      if (actionUnsupportedChecks.has(action) && response.status === 404) {
         const error = Error("ONEBOT_REJECTED");
         error.reason = "ACTION_UNSUPPORTED";
         throw error;
@@ -226,7 +304,7 @@ export class OneBot extends EventEmitter {
       else if (/Timeout: NTEvent/i.test(detail))
         error.reason = "GATEWAY_TIMEOUT";
       if (
-        ["delete_msg", "set_msg_emoji_like"].includes(action) &&
+        actionUnsupportedChecks.has(action) &&
         error.reason !== "GATEWAY_TIMEOUT" &&
         (body.retcode === 1404 ||
           body.retcode === 404 ||
@@ -402,6 +480,362 @@ export class OneBot extends EventEmitter {
     )
       throw Error("ONEBOT_REJECTED");
     return { confirmed: true };
+  }
+  groupInfo(args) {
+    return readGroupGateway(this, "info", args);
+  }
+  groupMembers(args) {
+    return readGroupGateway(this, "members", args);
+  }
+  async peerProfile({ userId, groupId }) {
+    const info = await this.call(
+      groupId ? "get_group_member_info" : "get_stranger_info",
+      {
+        user_id: userId,
+        ...(groupId ? { group_id: groupId } : {}),
+        no_cache: true,
+      },
+      10000,
+      { maxBytes: 65536 },
+    );
+    // The uncached member lookup is the live membership check, not historical chat data.
+    if (
+      String(info?.user_id) !== userId ||
+      (groupId && String(info?.group_id) !== groupId)
+    )
+      throw Error("PEER_PROFILE_IDENTITY_MISMATCH");
+    const text = (value) =>
+      typeof value === "string" ? value.slice(0, 200) : null;
+    return {
+      userId,
+      nickname: text(info.nickname),
+      signature: groupId
+        ? null
+        : text(info.long_nick ?? info.longNick ?? info.sign),
+      ...(groupId
+        ? {
+            groupId,
+            card: text(info.card),
+            title: text(info.title),
+            role: ["owner", "admin", "member"].includes(info.role)
+              ? info.role
+              : null,
+          }
+        : {}),
+    };
+  }
+  async profile() {
+    const info = await this.call(
+      "get_stranger_info",
+      { user_id: this.config.accountId, no_cache: true },
+      10000,
+      { maxBytes: 65536 },
+    );
+    if (String(info?.user_id) !== this.config.accountId)
+      throw Error("QQ_ACCOUNT_MISMATCH");
+    const text = (/** @type {unknown} */ value) =>
+      typeof value === "string" ? value.slice(0, 200) : null;
+    return {
+      nickname: text(info.nickname),
+      signature: text(info.long_nick ?? info.longNick ?? info.sign),
+    };
+  }
+  // NapCat keeps the stored signature and gender when set_qq_profile omits them.
+  async updateProfile({ nickname, signature, image }) {
+    const [action, params] =
+      nickname !== undefined
+        ? ["set_qq_profile", { nickname }]
+        : signature !== undefined
+          ? ["set_self_longnick", { longNick: signature }]
+          : ["set_qq_avatar", { file: "base64://" + image.toString("base64") }];
+    const result = await this.call(action, params, 30000);
+    if (
+      result === false ||
+      result?.result === false ||
+      (typeof result?.result === "number" && result.result !== 0)
+    )
+      throw Error("ONEBOT_REJECTED");
+    return { confirmed: true };
+  }
+  // QQ Zone has no OneBot action; NapCat only lends the web login cookies.
+  // They and the derived token stay inside this call and are never logged,
+  // stored or returned.
+  async qzoneSession({ signal, strictAccount = false } = {}) {
+    let data;
+    try {
+      data = await this.call(
+        "get_cookies",
+        { domain: "user.qzone.qq.com" },
+        10000,
+        { maxBytes: 16384, signal },
+      );
+    } catch (cause) {
+      // eslint-disable-next-line preserve-caught-error -- cancellation must not retain cookie gateway failures.
+      if (signal?.aborted) throw Error("ABORTED");
+      // Nothing was published yet, so this is a plain failure, never unknown.
+      const error = Error("ONEBOT_REJECTED");
+      error.reason =
+        cause?.reason === "ACTION_UNSUPPORTED"
+          ? "ACTION_UNSUPPORTED"
+          : strictAccount
+            ? "QZONE_READ_FAILED"
+            : "QZONE_LOGIN_REQUIRED";
+      throw error;
+    }
+    const jar = new Map();
+    for (const part of String(data?.cookies ?? "").split(";")) {
+      const at = part.indexOf("=");
+      if (at > 0) {
+        const name = part.slice(0, at).trim(),
+          value = part.slice(at + 1).trim();
+        if (
+          strictAccount &&
+          ["uin", "p_uin"].includes(name) &&
+          jar.has(name) &&
+          jar.get(name) !== value
+        )
+          throw peerQzoneFailure("QQ_ACCOUNT_MISMATCH");
+        jar.set(name, value);
+      }
+    }
+    const uin = String(jar.get("uin") ?? jar.get("p_uin") ?? "").replace(
+      /^o0*/,
+      "",
+    );
+    const key = jar.get("p_skey") || jar.get("skey");
+    if (strictAccount) {
+      const identities = [jar.get("uin"), jar.get("p_uin")].filter(
+        (value) => value !== undefined,
+      );
+      if (!identities.length) throw peerQzoneFailure("QZONE_LOGIN_REQUIRED");
+      if (
+        identities.some(
+          (value) =>
+            !/^o?0*[1-9]\d*$/.test(value) ||
+            value.replace(/^o?0*/, "") !== this.config.accountId,
+        )
+      )
+        throw peerQzoneFailure("QQ_ACCOUNT_MISMATCH");
+    }
+    if ((uin && uin !== this.config.accountId) || !key) {
+      // Still before publishing: a rejection, not an unknown result.
+      const error = Error("ONEBOT_REJECTED");
+      error.reason = key ? "QQ_ACCOUNT_MISMATCH" : "QZONE_LOGIN_REQUIRED";
+      throw error;
+    }
+    return {
+      token: qzoneToken(key),
+      headers: {
+        cookie: String(data.cookies),
+        origin: QZONE_ORIGIN,
+        referer: `${QZONE_ORIGIN}/${this.config.accountId}`,
+        "user-agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+      },
+    };
+  }
+  async qzoneFetch(url, init, { peerRead = false } = {}) {
+    const response = await this.fetch(url, {
+      ...init,
+      signal: init?.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(30000)])
+        : AbortSignal.timeout(30000),
+      redirect: "error",
+    });
+    if (!response.ok) {
+      if (peerRead)
+        throw peerQzoneFailure(
+          {
+            401: "QZONE_LOGIN_REQUIRED",
+            403: "QZONE_ACCESS_DENIED",
+            429: "QZONE_RATE_LIMITED",
+          }[response.status] || "QZONE_READ_FAILED",
+        );
+      throw Error("QZONE_HTTP_ERROR");
+    }
+    if (peerRead && !response.body)
+      throw peerQzoneFailure("QZONE_RESPONSE_UNREADABLE");
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of response.body) {
+      bytes += chunk.length;
+      if (bytes > QZONE_MAX_BYTES) throw Error("QZONE_RESPONSE_TOO_LARGE");
+      chunks.push(Buffer.from(chunk));
+    }
+    return qzoneBody(Buffer.concat(chunks).toString("utf8"));
+  }
+  async qzonePost({ content }) {
+    const session = await this.qzoneSession();
+    const uin = this.config.accountId;
+    // A transport error or unreadable reply leaves the post possibly public,
+    // so it propagates as an unknown result rather than a rejection.
+    const body = await this.qzoneFetch(
+      `${QZONE_ORIGIN}/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6?g_tk=${session.token}`,
+      {
+        method: "POST",
+        headers: {
+          ...session.headers,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          syn_tweet_verson: "1",
+          paramstr: "1",
+          who: "1",
+          con: content,
+          feedversion: "1",
+          ver: "1",
+          ugc_right: "1",
+          to_sign: "0",
+          hostuin: uin,
+          code_version: "1",
+          format: "json",
+          qzreferrer: `${QZONE_ORIGIN}/${uin}`,
+        }).toString(),
+      },
+    );
+    const code = qzoneStatus(body?.code),
+      subcode = qzoneStatus(body?.subcode);
+    // Only an explicit non-zero status proves nothing was published; a reply
+    // without one may follow a live post and must stay unknown.
+    if (code == null || (body.subcode != null && subcode == null))
+      throw Error("QZONE_RESPONSE_UNREADABLE");
+    if (code !== 0 || (subcode != null && subcode !== 0))
+      throw qzoneRejection(body);
+    return { confirmed: typeof body.tid === "string" && body.tid !== "" };
+  }
+  async qzoneRecent({ limit }) {
+    const session = await this.qzoneSession();
+    const params = new URLSearchParams({
+      uin: this.config.accountId,
+      ftype: "0",
+      sort: "0",
+      pos: "0",
+      num: String(limit),
+      replynum: "0",
+      g_tk: String(session.token),
+      code_version: "1",
+      format: "json",
+      need_private_comment: "1",
+    });
+    const body = await this.qzoneFetch(
+      `${QZONE_ORIGIN}/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6?${params}`,
+      { headers: session.headers },
+    );
+    if (body == null) throw Error("QZONE_RESPONSE_UNREADABLE");
+    const code = qzoneStatus(body?.code);
+    if (code == null) throw Error("QZONE_RESPONSE_UNREADABLE");
+    if (code !== 0) throw qzoneRejection(body);
+    return (Array.isArray(body.msglist) ? body.msglist : [])
+      .slice(0, limit)
+      .map((/** @type {any} */ post) => ({
+        id: typeof post?.tid === "string" ? post.tid : null,
+        text:
+          typeof post?.content === "string" ? post.content.slice(0, 1000) : "",
+        createdAt: Number.isFinite(post?.created_time)
+          ? new Date(post.created_time * 1000).toISOString()
+          : null,
+        comments: Number.isFinite(post?.cmtnum) ? post.cmtnum : 0,
+        images: Array.isArray(post?.pic) ? post.pic.length : 0,
+      }));
+  }
+  async peerQzoneRecent({ userId, limit = 5, signal, validate }) {
+    try {
+      if (
+        typeof userId !== "string" ||
+        !/^[1-9]\d{4,19}$/.test(userId) ||
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > 10
+      )
+        throw peerQzoneFailure("QZONE_TARGET_MISMATCH");
+      if (signal?.aborted) throw Error("ABORTED");
+      const session = await this.qzoneSession({ signal, strictAccount: true });
+      if (signal?.aborted) throw Error("ABORTED");
+      validate?.();
+      const params = new URLSearchParams({
+        uin: userId,
+        ftype: "0",
+        sort: "0",
+        pos: "0",
+        num: String(limit),
+        replynum: "0",
+        g_tk: String(session.token),
+        code_version: "1",
+        format: "json",
+        need_private_comment: "0",
+      });
+      const body = await this.qzoneFetch(
+        `${QZONE_ORIGIN}/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6?${params}`,
+        {
+          headers: { ...session.headers, referer: `${QZONE_ORIGIN}/${userId}` },
+          signal,
+        },
+        { peerRead: true },
+      );
+      if (signal?.aborted) throw Error("ABORTED");
+      const code = qzoneStatus(body?.code);
+      const subcode = body?.subcode == null ? 0 : qzoneStatus(body.subcode);
+      if (code == null || subcode == null)
+        throw peerQzoneFailure("QZONE_RESPONSE_UNREADABLE");
+      if (code !== 0 || subcode !== 0) {
+        const rejection = qzoneRejection(body);
+        if (rejection.reason === "QZONE_LOGIN_REQUIRED") throw rejection;
+        // Text is used only to classify an explicit failure; it is never returned.
+        const detail = String(body?.message ?? body?.msg ?? "");
+        throw peerQzoneFailure(
+          /权限|无权|禁止访问|没有访问|access denied|permission denied/i.test(
+            detail,
+          )
+            ? "QZONE_ACCESS_DENIED"
+            : /频繁|稍后再试|rate.?limit|too many/i.test(detail)
+              ? "QZONE_RATE_LIMITED"
+              : "QZONE_REJECTED",
+        );
+      }
+      if (!Array.isArray(body.msglist))
+        throw peerQzoneFailure("QZONE_RESPONSE_UNREADABLE");
+      const assertIdentity = (value) => {
+        if (value !== undefined && (value === null || String(value) !== userId))
+          throw peerQzoneFailure("QZONE_TARGET_MISMATCH");
+      };
+      assertIdentity(body.uin);
+      // Validate every returned author, including rows outside our output slice.
+      for (const post of body.msglist) {
+        if (!post || typeof post !== "object" || Array.isArray(post))
+          throw peerQzoneFailure("QZONE_RESPONSE_UNREADABLE");
+        assertIdentity(post.uin);
+        if (
+          typeof post.content !== "string" ||
+          typeof post.tid !== "string" ||
+          !post.tid
+        )
+          throw peerQzoneFailure("QZONE_RESPONSE_UNREADABLE");
+      }
+      const count = (value) =>
+        Number.isSafeInteger(value) && value >= 0 ? value : 0;
+      return body.msglist.slice(0, limit).map((post) => {
+        const time =
+          typeof post.created_time === "number" &&
+          Number.isFinite(post.created_time)
+            ? new Date(post.created_time * 1000)
+            : null;
+        return {
+          id: typeof post.tid === "string" ? post.tid.slice(0, 200) : null,
+          text:
+            typeof post.content === "string" ? post.content.slice(0, 1000) : "",
+          createdAt:
+            time && Number.isFinite(time.getTime()) ? time.toISOString() : null,
+          comments: count(post.cmtnum),
+          images: Array.isArray(post.pic) ? post.pic.length : 0,
+        };
+      });
+    } catch (error) {
+      if (signal?.aborted || error?.message === "ABORTED")
+        // eslint-disable-next-line preserve-caught-error -- cancellation has no provider payload.
+        throw Error("ABORTED");
+      // Do not carry a cause: HTTP and gateway errors can contain cookie bytes.
+      throw peerQzoneFailure(error?.reason || "QZONE_READ_FAILED");
+    }
   }
   async setTyping(conversation, { signal } = {}) {
     const target = /^private:(\d+)$/.exec(conversation)?.[1];
