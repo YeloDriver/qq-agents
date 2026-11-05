@@ -40,18 +40,30 @@ export class RoomStore {
       .get(generation, slot);
   }
   /** @param {string} generation @param {boolean} visible */
-  content(generation, visible) {
+  content(generation, visible, snapshots = true) {
     return {
       contentRevision: this.revision(generation),
       items: HOME_SLOTS.map((slot) => {
         const row = this.item(generation, slot),
-          shown = visible && row?.state === "published";
+          source = this.db
+            .prepare(
+              "SELECT value FROM home_item_sources WHERE generation=? AND slot=?",
+            )
+            .get(generation, slot),
+          shown =
+            visible && row?.state === "published" && (!source || snapshots);
         return {
           slot,
           itemId: row?.item_id || null,
           itemRevision: row?.revision || 0,
           state: row?.state || "empty",
-          ...(shown ? { title: row.title, body: row.body } : {}),
+          ...(shown
+            ? {
+                title: row.title,
+                body: row.body,
+                ...(source ? { source: JSON.parse(source.value) } : {}),
+              }
+            : {}),
           visible: shown,
           updatedAt: row?.updated_at || null,
         };
@@ -68,8 +80,8 @@ export class RoomStore {
     return row ? JSON.parse(row.result) : null;
   }
   /** One namespace spans every owner operation, independent of model session lifetime.
-   * @param {string} generation @param {string} kind @param {any} args @param {number|null} quota @param {number} now @param {()=>any} apply */
-  execute(generation, kind, args, quota, now, apply) {
+   * @param {string} generation @param {string} kind @param {any} args @param {number|null} quota @param {number} now @param {()=>any} apply @param {any} [intent] */
+  execute(generation, kind, args, quota, now, apply, intent) {
     const key = "room:" + generation,
       digest = createHash("sha256")
         .update(JSON.stringify(canonical({ kind, args })))
@@ -90,6 +102,7 @@ export class RoomStore {
           historical: true,
         };
       }
+      intent?.before();
       const day = new Date(now).toISOString().slice(0, 10);
       if (quota !== null) {
         const n =
@@ -119,6 +132,7 @@ export class RoomStore {
             "INSERT INTO home_write_usage(generation,day,writes) VALUES(?,?,1) ON CONFLICT(generation,day) DO UPDATE SET writes=writes+1",
           )
           .run(generation, day);
+      intent?.after(result);
       this.db.exec("COMMIT");
       return { ...result, replayed: false, historical: false };
     } catch (error) {
@@ -159,8 +173,8 @@ export class RoomStore {
     if (!row) throw Error("HOME_REVISION_NOT_FOUND");
     return JSON.parse(row.layout);
   }
-  /** @param {string} generation @param {string} slot @param {number} expected @param {string} state @param {string} title @param {string} body @param {number} now */
-  writeItem(generation, slot, expected, state, title, body, now) {
+  /** @param {string} generation @param {string} slot @param {number} expected @param {string} state @param {string} title @param {string} body @param {number} now @param {any} [source] */
+  writeItem(generation, slot, expected, state, title, body, now, source) {
     const row = this.item(generation, slot);
     if ((row?.revision || 0) !== expected) throw Error("HOME_ITEM_CONFLICT");
     const itemId = row?.item_id || randomUUID(),
@@ -180,6 +194,13 @@ export class RoomStore {
         body,
         new Date(now).toISOString(),
       );
+    this.db
+      .prepare("DELETE FROM home_item_sources WHERE generation=? AND slot=?")
+      .run(generation, slot);
+    if (source)
+      this.db
+        .prepare("INSERT INTO home_item_sources VALUES(?,?,?)")
+        .run(generation, slot, JSON.stringify(source));
     this.db
       .prepare(
         "INSERT INTO home_rooms(generation,content_revision) VALUES(?,?) ON CONFLICT(generation) DO UPDATE SET content_revision=excluded.content_revision",

@@ -127,6 +127,8 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS people(agent_id TEXT NOT NULL,qq TEXT NOT NULL,names TEXT NOT NULL,PRIMARY KEY(agent_id,qq));
       CREATE TABLE IF NOT EXISTS deliveries(agent_id TEXT NOT NULL,request_id TEXT NOT NULL,conversation TEXT NOT NULL,payload_hash TEXT NOT NULL,status TEXT NOT NULL,message_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(agent_id,request_id));
       CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries(agent_id,conversation,message_id);
+      CREATE TABLE IF NOT EXISTS qzone_approvals(id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,value TEXT NOT NULL,UNIQUE(agent_id,request_id));
+      CREATE INDEX IF NOT EXISTS qzone_approvals_state ON qzone_approvals(agent_id,state,created_at);
       CREATE INDEX IF NOT EXISTS deliveries_status ON deliveries(agent_id,status);
       CREATE TABLE IF NOT EXISTS runtime(agent_id TEXT NOT NULL,conversation TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(agent_id,conversation));
       CREATE TABLE IF NOT EXISTS migrations(agent_id TEXT NOT NULL,source TEXT NOT NULL,digest TEXT NOT NULL,imported_at TEXT NOT NULL,PRIMARY KEY(agent_id,source,digest));
@@ -139,6 +141,13 @@ export class MemoryStore {
       CREATE TABLE IF NOT EXISTS board_entries(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,post_id TEXT,reply_to TEXT,author_kind TEXT NOT NULL,author_id TEXT NOT NULL,request_id TEXT,title TEXT NOT NULL,body TEXT NOT NULL,day TEXT NOT NULL,created_at TEXT NOT NULL,removed_at TEXT,UNIQUE(author_kind,author_id,request_id));
       CREATE INDEX IF NOT EXISTS board_threads ON board_entries(post_id,seq);
       CREATE INDEX IF NOT EXISTS board_quota ON board_entries(author_kind,author_id,day);
+      CREATE TABLE IF NOT EXISTS home_item_sources(generation TEXT NOT NULL,slot TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(generation,slot));
+      CREATE TABLE IF NOT EXISTS home_intents (
+      generation TEXT NOT NULL, id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
+      digest TEXT NOT NULL, source_session TEXT NOT NULL, state TEXT NOT NULL,
+      proposal TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+      last_viewed_at INTEGER, resolved_at INTEGER, last_attempt_at INTEGER, last_attempt_error TEXT, operation_request_id TEXT, receipt TEXT,
+      UNIQUE(generation,request_id));
       CREATE TABLE IF NOT EXISTS home_rooms(generation TEXT PRIMARY KEY,content_revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS home_items(generation TEXT NOT NULL,slot TEXT NOT NULL,item_id TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(generation,slot));
       CREATE TABLE IF NOT EXISTS home_write_usage(generation TEXT NOT NULL,day TEXT NOT NULL,writes INTEGER NOT NULL,PRIMARY KEY(generation,day));
@@ -1255,6 +1264,7 @@ class AgentMemory {
       "projects",
       "memory_corrections",
       "activity_history",
+      "qzone_approvals",
     ])
       tables[name] = this.db
         .prepare(

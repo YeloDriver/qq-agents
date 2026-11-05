@@ -1,4 +1,6 @@
 // @ts-check
+import { resolveProjectSnapshot } from "./project-snapshots.mjs";
+import { HomeIntents } from "./intents.mjs";
 import { RoomStore } from "./room-store.mjs";
 import { HOME_AUDIENCE, HOME_READ_TOOLS } from "./policy.mjs";
 import { homeTemplate, validateLayout } from "./layout.mjs";
@@ -13,6 +15,7 @@ export class HomeRooms {
     this.home = home;
     this.runtime = home.runtime;
     this.store = new RoomStore(home.runtime.memory.db);
+    this.intents = new HomeIntents(this);
   }
   /** @param {any} ctx @param {boolean} [write] */
   authorize(ctx, write = false) {
@@ -30,7 +33,7 @@ export class HomeRooms {
     return a;
   }
   /** Layout choices carry no free text, but protected turns still cannot affect shared display. @param {any} ctx */
-  shareable(ctx) {
+  shareable(ctx, layoutProposal = false) {
     const r = this.runtime,
       p = contextProtection(r, ctx);
     if (
@@ -58,7 +61,13 @@ export class HomeRooms {
           "private-conversation",
           "group-conversation",
           "unknown-legacy",
-        ].includes(sourceClass(r, ctx, id))
+        ]
+          .filter(
+            (kind) =>
+              !layoutProposal ||
+              !["private-conversation", "group-conversation"].includes(kind),
+          )
+          .includes(sourceClass(r, ctx, id))
       )
         throw Error("HOME_SOURCE_DENIED");
       // Own diaries can cite older chat records; the intermediate record is not declassification.
@@ -80,7 +89,11 @@ export class HomeRooms {
         audience: HOME_AUDIENCE,
         enabled: a.home?.enabled === true,
         publishing: visible,
-        ...this.store.content(generation, visible),
+        ...this.store.content(
+          generation,
+          visible,
+          a.home?.projectSnapshots?.enabled === true,
+        ),
         layoutRevision: this.store.layout(generation).layoutRevision,
       };
       db.exec("COMMIT");
@@ -114,6 +127,8 @@ export class HomeRooms {
   }
   /** @param {any} ctx @param {string} name @param {any} args */
   tool(ctx, name, args) {
+    if (name.startsWith("room_intent_"))
+      return this.intents.tool(ctx, name, args);
     const a = this.authorize(ctx, !HOME_READ_TOOLS.includes(name)),
       generation = this.home.generation(a.id);
     if (
@@ -131,9 +146,14 @@ export class HomeRooms {
           read: true,
           layout: ctx.conversation === "@subject",
           publish: ctx.conversation === "@subject" && a.home.publishing,
+          publishSnapshot:
+            ctx.conversation === "@subject" &&
+            a.home.publishing &&
+            a.home.projectSnapshots?.enabled === true,
         },
         limits: {
-          slots: 4,
+          slots: 5,
+          tagline: 80,
           title: 80,
           body: 6000,
           maxWritesPerDay: a.home.maxWritesPerDay,
@@ -190,15 +210,27 @@ export class HomeRooms {
           : "无法确认该请求结果；不要换 requestId 猜测重做。",
       };
     }
+    if (args.requestId.startsWith("intent_") && !ctx.homeIntentExecution)
+      throw Error("HOME_REQUEST_CONFLICT");
     // Even a replay must pass today's permissions and source boundaries.
     if (name !== "room_retract") this.shareable(ctx);
     if (name === "room_publish") {
+      if (
+        args.slot === "tagline" &&
+        (typeof args.body !== "string" || args.body.length > 80)
+      )
+        throw Error("HOME_ITEM_INVALID");
       if (!a.home.publishing) throw Error("HOME_PUBLISH_DISABLED");
       this.runtime.assertSafeOutput(
         ctx,
         JSON.stringify({ title: args.title, body: args.body }),
       );
     }
+    if (
+      name === "room_publish_snapshot" &&
+      (!a.home.publishing || !a.home.projectSnapshots?.enabled)
+    )
+      throw Error("HOME_SNAPSHOT_DISABLED");
     const now = this.runtime.now();
     const apply = () => {
       this.assertObserved(ctx, args, name);
@@ -244,16 +276,21 @@ export class HomeRooms {
         );
       }
       const old = this.store.item(generation, args.slot);
-      if (name === "room_publish") {
+      if (name === "room_publish" || name === "room_publish_snapshot") {
         if (old?.state === "hidden") throw Error("HOME_ITEM_HIDDEN");
+        const snapshot =
+          name === "room_publish_snapshot"
+            ? resolveProjectSnapshot(this, ctx, args.source)
+            : null;
         return this.store.writeItem(
           generation,
           args.slot,
           args.expectedItemRevision,
           "published",
-          args.title,
-          args.body,
+          snapshot?.title ?? args.title,
+          snapshot?.body ?? args.body,
           now,
+          snapshot?.source,
         );
       }
       if (name !== "room_retract") throw Error("UNKNOWN_TOOL");
@@ -276,6 +313,7 @@ export class HomeRooms {
       name === "room_retract" ? null : a.home.maxWritesPerDay,
       now,
       apply,
+      ctx.homeIntentExecution,
     );
     const current = this.display(a.id);
     this.observed(ctx, current);

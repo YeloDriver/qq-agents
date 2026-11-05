@@ -55,6 +55,7 @@
     "src/tools/reactions.mjs",
     "src/tools/profile.mjs",
     "src/core/qzone.mjs",
+    "src/core/qzone-approvals.mjs",
     "src/core/peer-qzone.mjs",
     "src/tools/qzone.mjs",
 
@@ -95,11 +96,21 @@
     "scripts/game-compatibility.mjs",
     "public/home-preview/scene.mjs",
     "public/home-space/book.mjs",
+    "public/home-space/interiors.mjs",
     "src/home/layout.mjs",
     "src/home/store.mjs",
     "src/home/service.mjs",
     "src/home/policy.mjs",
     "src/home/room-store.mjs",
-    "src/home/rooms.mjs"
+    "src/home/rooms.mjs",
+    "src/home/scene-view.mjs",
+    "src/home/browser-process.mjs",
+    "src/home/browser-launcher.mjs",
+    "src/home/browser-job.mjs",
+    "test/home-scene-cold.browser.mjs",
+    "src/tools/media-lease.mjs",
+    "public/home-space/scene-decoration.mjs",
+    "src/home/project-snapshots.mjs",
+    "src/home/intents.mjs"
   ]
 }

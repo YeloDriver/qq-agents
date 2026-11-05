@@ -1,3 +1,4 @@
+import { QzoneApprovals } from "./qzone-approvals.mjs";
 import { HOME_TOOLS } from "../home/policy.mjs";
 import { HomeService } from "../home/service.mjs";
 import { contextProtection } from "./protected-mind.mjs";
@@ -131,6 +132,7 @@ export class Runtime {
       this.contexts.upgradeInstructions(a, self);
     }
     this.home = new HomeService(this);
+    this.qzoneApprovals = new QzoneApprovals(this);
     this.banter = new BanterCoordinator({
       botIds: this.config.connections.map((c) => c.accountId),
       ...this.config.peerLimit,
@@ -921,7 +923,16 @@ export class Runtime {
       this.protectedWork.record(
         ctx,
         "tool",
-        JSON.stringify({ name, result }).slice(0, 24000),
+        JSON.stringify({
+          name,
+          result:
+            name === "room_scene_view"
+              ? {
+                  notice:
+                    "受控场景观察仅交付当前回合，不在工具工作日志保留正文与图片。",
+                }
+              : result,
+        }).slice(0, 24000),
       );
     if (
       ["web_fetch", "social_read", "social_search", "social_comments"].includes(

@@ -81,7 +81,7 @@ Antigravity 可选 `cliReuse` 只适用于此后端：`enabled` 默认 `false`�
 
 ## 宿舍留言板（board）
 
-全局 `board` 控制所有角色和管理员共用的留言板：`enabled` 默认 `false`；`dailyPosts`（默认 3）、`dailyComments`（默认 10）和 `dailyReactions`（默认 20）是每个角色每天的发帖、评论和贴表情上限，`tags` 是帖子可选的分类（默认日常、分享、求助、提议、通知，最多 12 个），`timezone`（默认 `Asia/Shanghai`）决定按哪天计数。开启后所有角色的聊天会话和空闲时间都有 `board_read`、`board_post`、`board_comment`、`board_react`、`board_retract`，不依赖角色已保存的工具列表；新帖不会唤醒角色，QQ 好友看不到。开启或关闭会改变会话工具集，各会话下一回合交接重建。详见 [宿舍留言板](DORM-BOARD.md)。
+全局 `board` 控制所有角色和管理员共用的留言板：`enabled` 在新安装默认配置中为 `true`，现有显式值保留，旧配置缺少 `board` 或 `board.enabled` 时仍为 `false`；`dailyPosts`（默认 3）、`dailyComments`（默认 10）和 `dailyReactions`（默认 20）是每个角色每天的发帖、评论和贴表情上限，`tags` 是帖子可选的分类（默认日常、分享、求助、提议、通知，最多 12 个），`timezone`（默认 `Asia/Shanghai`）决定按哪天计数。开启后所有角色的聊天会话和空闲时间都有 `board_read`、`board_post`、`board_comment`、`board_react`、`board_retract`，不依赖角色已保存的工具列表；新帖不会唤醒角色，QQ 好友看不到。开启或关闭会改变会话工具集，各会话下一回合交接重建。详见 [宿舍留言板](DORM-BOARD.md)。
 
 ## 私聊模式群
 
@@ -397,7 +397,15 @@ QQ 掉线、自动重连用完次数时，管理台会显示，但主人在 QQ �
 - `qzone_read` 接受可选 `limit`（1–10，默认 5），返回自己最近说说的编号、文字（最多 1000 字）、时间、评论数和图片数，不返回评论内容。
 - `qzone_post` 接受 `requestId` 和 `content`（1–1000 字，可换行，不能含其他控制字符或方向覆盖字符），只发所有人可见的纯文字说说；暂不支持带图。
 
-说说对所有人可见，所以本回合读过的内容来自其他聊天时，按外部调用要求管理员披露授权（`PRIVATE_RECOLLECTION_EXTERNAL_CALL_BLOCKED`）；含疑似凭据的文字被拒绝。发布走统一动作账本：暂停、静默、总分钟/小时发送限速照常生效，不占用或恢复文字回复额度；同一 `requestId` 只返回原回执。取 cookie 失败或 QQ 空间明确返回错误码记为失败：登录失效返回 `QZONE_LOGIN_REQUIRED`，其他拒绝（包括疑似风控、频率限制）返回 `QZONE_REJECTED`，网关不支持 `get_cookies` 返回 `QZONE_UNSUPPORTED`。网络错误、HTTP 错误、无法解析的回复、没有明确数字状态码的回复，或成功但没有说说编号，都记为 `unknown`，因为说说可能已经发出；此时任何新的 `requestId` 都会被拒绝（`QZONE_POST_UNCONFIRMED`），需管理员在 QQ 空间和管理台核对。读取失败统一返回 `QZONE_READ_FAILED`，不透出网页原文。
+说说对所有人可见。没有受限来源的上下文仍可按原权限自主发布；读过跨聊天回忆、运维或好友可见空间资料等受限来源时，`qzone_post` 返回 `status: "awaiting_approval"`、`approvalId`、原 `requestId` 和到期时间，表示尚未发布。管理员在首页“受限动作授权”查看角色、账号、完整正文与来源数量，选择“批准并发布这条说说”或“取消申请”。批准只允许服务端发布所示原文，不再次运行模型，也不授予该会话通用披露权限。
+
+申请保留 24 小时，每个角色最多 10 条待审/正在发布申请，回合结束和服务重启不删除待审稿。同一 `requestId` 重复提交返回原状态且不延长有效期；换正文、账号或会话复用原编号返回 `QZONE_APPROVAL_CONFLICT`。改稿应取消旧申请，使用新 `requestId` 提交并重新审批。过期、取消或已尝试发布的申请不能再次批准；普通回合的披露批准不能代替这条说说的独立批准。新回合后来读到的无关内容不加入已冻结的原文和来源集合，原来源新增保护标记时仍会在执行前被拦截。
+
+待审正文与来源只存于私有 SQLite 的独立 `qzone_approvals` 表，不进入普通事件、日记、共享 Self 或记忆检索；模型工具回执只包含申请编号、请求编号、状态和到期时间。管理台经管理员鉴权读取完整正文，响应禁止缓存，正文按文字转义展示；错误诊断不记录正文。数据库、单角色导出和完整备份均须按私有资料保管。JSON 导出保留申请历史与原编号，恢复时取消待审/正在发布的申请，不继承发布授权；完整 SQLite 恢复保留尚未到期的待审申请，但不会自动发布。终态记录保留用于核对和防重。详见[迁移说明](MIGRATION.md#说说审批数据)。
+
+批准和实际发送共用原 `requestId` 及统一动作账本。原编号已被其他动作、不同正文或会话占用时返回 `IDEMPOTENCY_CONFLICT`，其回执不会被当作待审稿的发布结果。进入实际发送队列后重新核对账号、工具权限、功能开关、主人范围、暂停、静默、受限来源和发送额度。批准前置检查失败且未预留投递时保留申请，恢复条件后需管理员重新点击批准；已经预留发送的申请不得自动重试。发布不占用或恢复文字回复额度；含疑似凭据的文字在保存申请前被拒绝。每日预算、总分钟/小时限速仍按真实发送尝试计算，提交待审稿不占发送预算。
+
+取 cookie 失败或 QQ 空间明确返回错误码记为失败：登录失效返回 `QZONE_LOGIN_REQUIRED`，其他拒绝（包括疑似风控、频率限制）返回 `QZONE_REJECTED`，网关不支持 `get_cookies` 返回 `QZONE_UNSUPPORTED`。网络错误、HTTP 错误、无法解析的回复、没有明确数字状态码的回复，或成功但没有说说编号，都记为 `unknown`，因为说说可能已经发出；此时任何新的发布请求都会被拒绝（`QZONE_POST_UNCONFIRMED`），需管理员在 QQ 空间和管理台核对。重启时依据发送账本关闭未完成的发布审批，不重发；若在占用审批后、预留投递前中断，则申请标为失败，由管理员检查后另行提交。读取失败统一返回 `QZONE_READ_FAILED`，不透出网页原文。
 
 ## 撤回自己刚发的消息
 
@@ -418,9 +426,24 @@ QQ 掉线、自动重连用完次数时，管理台会显示，但主人在 QQ �
 `agents[].home` 是逐角色策略，管理台角色高级设置可编辑。缺省为：
 
 ```json
-{ "enabled": false, "publishing": false, "maxWritesPerDay": 20 }
+{
+  "enabled": false,
+  "publishing": false,
+  "sceneView": { "enabled": false },
+  "projectSnapshots": { "enabled": false },
+  "maxWritesPerDay": 20,
+  "intents": {
+    "enabled": false,
+    "hints": true,
+    "ttlDays": 7,
+    "maxPending": 20,
+    "maxSubmissionsPerDay": 20
+  }
+}
 ```
 
-`enabled` 开放所有会话读取自己的房间，以及自己的主人格布置；`publishing` 还需在 `enabled` 开启时才允许主人格发布并显示原创文字。两个开关默认关闭，旧角色不会自动获得能力。`maxWritesPerDay` 范围 1–100，UTC 日内累计布置/发布成功次数，撤回、只读、预览和幂等重取不占额度。小窝工具由这些策略控制，不靠通用工具勾选扩大权限。展示对象固定为实例管理员和房主自己的会话，不开放其他角色或公网访客；启用不授权 QQ 发送、自动唤醒或发布私人资料。
+`enabled` 开放所有会话读取自己的房间，以及自己的主人格布置；`publishing` 还需在 `enabled` 开启时才允许主人格发布并显示原创文字。这些开关默认关闭，旧角色不会自动获得新能力。`projectSnapshots.enabled` 额外开放本人可信项目原稿的固定版本文字副本，仍须同时启用 `enabled` 与 `publishing`；关闭后隐藏副本正文与出处，普通原创文字继续沿用原权限。门牌短语属于 `publishing`，不额外扩大权限。`maxWritesPerDay` 范围 1–100，UTC 日内累计布置/发布成功次数，撤回、只读、预览和幂等重取不占额度。小窝工具由这些策略控制，不靠通用工具勾选扩大权限。展示对象固定为实例管理员和房主自己的会话，不开放其他角色或公网访客；启用不授权 QQ 发送、自动唤醒或发布私人资料。
 
-关闭 `publishing` 隐藏正文但保留存储，重新开启可继续显示；持续撤回使用主人格撤回或管理员隐藏。小窝意图和图片快照尚未实现。详见 [纸页小窝](AI-HOME.md)。
+关闭 `publishing` 隐藏正文但保留存储，重新开启可继续显示；持续撤回使用主人格撤回或管理员隐藏。`sceneView.enabled` 默认 `false`，需独立开启受控图片观察。开启后图片只交给当前会话所用模型供应商，不引入新服务；需要本机 Chromium（复用 `QQ_SCREENSHOT_BROWSER` / `CHROME_PATH`）。`room_scene_view` 固定桌面 960px 或手机 390px 视口，单张最多 4 MiB，实例最多并行 2 次、角色每 5 秒 1 次、20 秒生成预算（清理另有最多 3 秒预算）。无视觉、缺浏览器或渲染失败会明确文字降级，不冒充看见图片。旧角色即使已启用小窝也不自动获得看图权限。
+
+新增 `home.intents` 独立配置：`enabled` 默认 false，`hints` 默认 true（仅启用时有效）；`ttlDays` 默认 7、范围 1–30；`maxPending` 和 `maxSubmissionsPerDay` 默认 20、范围 1–100。额度按 UTC 日统计，已接受未执行项仍占待处理数。提示只加入已运行主体回合，不唤醒、不标已读。详见 [纸页小窝](AI-HOME.md)。
