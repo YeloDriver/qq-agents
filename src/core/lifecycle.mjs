@@ -106,7 +106,27 @@ function draftPrompt(runtime, ctx) {
     ? `本聊天待处理草稿（qq_draft 查看原稿、修改、放弃或显式继续；已发送和未知项不可重发）：${JSON.stringify(page)}`
     : "";
 }
+// This is a fallback estimate, not a provider tokenizer. Keep non-ASCII text,
+// punctuation and opaque identifiers at the original character allowance;
+// compact only ordinary ASCII runs that dominate bridge JSON schemas.
+export function estimateTextTokens(text) {
+  let tokens = 0;
+  for (const match of text.matchAll(/[A-Za-z0-9_]+|[^A-Za-z0-9_]/gu)) {
+    const part = match[0];
+    const ordinary =
+      /^[A-Za-z0-9_]+$/.test(part) &&
+      part.length <= 32 &&
+      !(part.length >= 16 && /[0-9]/.test(part));
+    tokens += ordinary ? Math.ceil(part.length / 3) : part.length;
+  }
+  return tokens;
+}
+
 export class ContextLifecycle {
+  estimate(ctx, text) {
+    ctx.estimatedAdded = (ctx.estimatedAdded || 0) + text.length;
+    ctx.estimatedTokens = (ctx.estimatedTokens || 0) + estimateTextTokens(text);
+  }
   constructor(runtime) {
     this.runtime = runtime;
     runtime.memory.db.exec(
@@ -847,8 +867,10 @@ export class ContextLifecycle {
           }
         : {}),
     });
-    ctx.estimatedAdded =
-      prompt.length + (ctx.initialSession ? instructions.length : 0);
+    ctx.estimatedAdded = 0;
+    ctx.estimatedTokens = 0;
+    this.estimate(ctx, prompt);
+    if (ctx.initialSession) this.estimate(ctx, instructions);
     return {
       instructions,
       prompt,
@@ -963,19 +985,25 @@ export class ContextLifecycle {
       return;
     }
     if (!a) return;
+    const acpEstimate =
+      backend?.config?.type === "antigravity" &&
+      backend.config.cliProtocol === "acp";
     let usage = s.usage;
     if (!usage || usage.at < ctx.turnStartedAt)
       usage = {
         source: "estimated",
         contextTokens:
           (s.usage?.contextTokens || 0) +
-          ctx.estimatedAdded +
+          (acpEstimate && Number.isFinite(ctx.estimatedTokens)
+            ? ctx.estimatedTokens
+            : ctx.estimatedAdded) +
           (ctx.estimatedImageTokens || 0),
         capacityTokens:
           s.usage?.capacityTokens || a.contextPolicy.capacityTokens,
         at: r.now(),
-        basis:
-          "tracked text characters plus tool output and image allowance; conservative estimate, excludes unknown backend overhead",
+        basis: acpEstimate
+          ? "ACP fallback estimate: short ASCII runs at ceil(chars/3), other UTF-16 units and opaque identifiers unchanged; full image allowance; not measured provider occupancy"
+          : "tracked text characters plus tool output and image allowance; conservative estimate, excludes unknown backend overhead",
       };
     const capacity =
       usage.capacityTokens > 0

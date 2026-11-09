@@ -1,6 +1,172 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { config, fixture } from "./helpers.mjs";
+import { TOOL_NAMES } from "../src/tools/names.mjs";
+import { estimateTextTokens } from "../src/core/lifecycle.mjs";
+
+function acpConfig({
+  capacityTokens = 65536,
+  reserveTokens = 4096,
+  hardRatio,
+} = {}) {
+  const cfg = config(1);
+  cfg.backends[0] = {
+    ...cfg.backends[0],
+    type: "antigravity",
+    cliProtocol: "acp",
+  };
+  cfg.agents[0].contextPolicy = {
+    ...cfg.agents[0].contextPolicy,
+    capacityTokens,
+    reserveTokens,
+    ...(hardRatio ? { hardRatio } : {}),
+  };
+  return cfg;
+}
+
+function acpFixture(t, options = {}) {
+  const f = fixture(t, { ...options, cfg: options.cfg || acpConfig() });
+  const factory = f.runtime.backendFactory;
+  f.runtime.backendFactory = (...args) => ({
+    ...factory(...args),
+    config: { type: "antigravity", cliProtocol: "acp" },
+  });
+  return f;
+}
+
+test("fallback token estimate compresses ordinary ASCII and preserves UTF-16 and opaque runs", () => {
+  const english = "The quick brown fox jumps over the lazy dog.";
+  const json = JSON.stringify({
+    enabled: true,
+    user_name: "Alice",
+    count: 123,
+  });
+  assert.ok(estimateTextTokens(english) < english.length);
+  assert.ok(estimateTextTokens(json) < json.length);
+
+  const nonAscii = "中文，。😀!?";
+  assert.equal(estimateTextTokens(nonAscii), nonAscii.length);
+
+  const opaque = "opaque_" + "Q".repeat(40);
+  assert.equal(estimateTextTokens(opaque), opaque.length);
+  const numberedOpaque = "token_123456789012345";
+  assert.equal(estimateTextTokens(numberedOpaque), numberedOpaque.length);
+});
+
+test("ACP estimate tracks original UTF-16 characters and compacted tokens", (t) => {
+  const f = acpFixture(t),
+    ctx = {};
+  const first = "bridge_schema: short_ascii 中文😀";
+  const second = "opaque_" + "A".repeat(40);
+  f.runtime.contexts.estimate(ctx, first);
+  f.runtime.contexts.estimate(ctx, second);
+  assert.equal(ctx.estimatedAdded, first.length + second.length);
+  assert.equal(
+    ctx.estimatedTokens,
+    estimateTextTokens(first) + estimateTextTokens(second),
+  );
+});
+
+test("ACP full tool catalog at 65536 tokens keeps a continuous session across turns", async (t) => {
+  const cfg = acpConfig({ capacityTokens: 65536 });
+  cfg.agents[0].tools = [...TOOL_NAMES];
+  let calls = 0,
+    toolCount = 0;
+  const f = acpFixture(t, {
+    cfg,
+    run: async (p) => {
+      calls++;
+      toolCount = p.tools.length;
+      p.saveSession(
+        p.session || { id: "acp-full-catalog", backend: "antigravity" },
+      );
+    },
+  });
+  const scope = "group:20000",
+    memory = f.store.bind("agent-0");
+  for (let turn = 0; turn < 3; turn++) {
+    await f.runtime.wake("agent-0", scope);
+    const state = memory.state(scope);
+    assert.equal(state.session?.id, "acp-full-catalog");
+    assert.notEqual(state.lifecycle.reason, "capacity-guard");
+    assert.equal(state.usage.source, "estimated");
+  }
+  assert.equal(calls, 3);
+  assert.ok(toolCount > 8);
+});
+
+for (const [label, content] of [
+  ["Chinese text", "界，🙂".repeat(2000)],
+  ["opaque ASCII", "OpaqueIdentifier".repeat(500)],
+])
+  test(`ACP still retires for genuinely oversized ${label}`, async (t) => {
+    const cfg = acpConfig({
+      capacityTokens: 4096,
+      reserveTokens: 1024,
+      hardRatio: 0.8,
+    });
+    const f = acpFixture(t, {
+      cfg,
+      run: async (p) => {
+        p.saveSession({ id: "oversized-acp", backend: "antigravity" });
+        const ctx = f.runtime.running.get("agent-0|group:20000");
+        f.runtime.contexts.estimate(ctx, content);
+      },
+    });
+    await f.runtime.wake("agent-0", "group:20000");
+    const state = f.store.bind("agent-0").state("group:20000");
+    assert.equal(state.session, null);
+    assert.equal(state.lifecycle.reason, "capacity-guard");
+  });
+
+test("ACP image allowance stays full and old estimated occupancy is never divided", async (t) => {
+  const capacityTokens = 2000000;
+  const f = acpFixture(t, {
+    cfg: acpConfig({ capacityTokens }),
+    run: async (p) => {
+      const ctx = f.runtime.running.get("agent-0|group:20000");
+      expectedTextTokens = ctx.estimatedTokens;
+      ctx.estimatedImageTokens = 4096;
+      p.saveSession({ id: "acp-image-budget", backend: "antigravity" });
+    },
+  });
+  const memory = f.store.bind("agent-0"),
+    scope = "group:20000";
+  memory.setState(scope, {
+    ...memory.state(scope),
+    usage: {
+      source: "estimated",
+      contextTokens: 30000,
+      capacityTokens,
+      at: 0,
+    },
+  });
+  let expectedTextTokens = 0;
+  await f.runtime.wake("agent-0", scope);
+  assert.equal(
+    memory.state(scope).usage.contextTokens,
+    30000 + expectedTextTokens + 4096,
+  );
+});
+
+test("ACP measured usage takes priority over text and image estimates", async (t) => {
+  const f = acpFixture(t, {
+    run: async (p) => {
+      const ctx = f.runtime.running.get("agent-0|group:20000");
+      ctx.estimatedImageTokens = 8192;
+      p.saveSession({ id: "acp-measured", backend: "antigravity" });
+      p.onUsage({
+        source: "measured",
+        contextTokens: 1234,
+        capacityTokens: 65536,
+      });
+    },
+  });
+  await f.runtime.wake("agent-0", "group:20000");
+  const usage = f.store.bind("agent-0").state("group:20000").usage;
+  assert.equal(usage.source, "measured");
+  assert.equal(usage.contextTokens, 1234);
+});
 
 test("late usage from a finished turn cannot force the next turn to retire a reusable session", async (t) => {
   let previous,

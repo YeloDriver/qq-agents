@@ -114,9 +114,11 @@ Antigravity 官方说明 CLI 会自动将旧上下文压缩成 checkpoint。框�
 
 若希望保留更长的原生会话，在确认所选模型窗口后设置角色 `contextPolicy.capacityTokens`。例如 `65536` 是管理员选择的框架预算，不是自动识别的模型上限；预留量和 `hardRatio` 仍生效。不要仅因模型宣称长窗口而取消容量保护。默认容量保持 `32768`，已有显式配置不变。
 
-Headless 上下文占用取成功回合中最后一个已完成 `agent_response` 的 `input_tokens + cache_read_tokens + output_tokens`，包含缓存输入，不累加各轮请求，不重复加入已包含在输出中的 thinking tokens。ACP 则取当前会话、本轮 `session/prompt` 期间最后一条有效 `usage_update.used`；对应的 `size` 是窗口信息，不会覆盖管理员配置。两种通道都忽略其他会话和终态后的迟到数据；ACP 的 `session/prompt` 返回值中的 `usage` 可能累计多次推理，不作为占用。没有有效测量时保留框架原有保守估算，不能把缺失数据当作零。
+Headless 上下文占用取成功回合中最后一个已完成 `agent_response` 的 `input_tokens + cache_read_tokens + output_tokens`，包含缓存输入，不累加各轮请求，不重复加入已包含在输出中的 thinking tokens。ACP 则取当前会话、本轮 `session/prompt` 期间最后一条有效 `usage_update.used`；对应的 `size` 是窗口信息，不会覆盖管理员配置。两种通道都忽略其他会话和终态后的迟到数据；ACP 的 `session/prompt` 返回值中的 `usage` 可能累计多次推理，不作为占用。没有有效测量时使用框架 fallback，不能把缺失数据当作零。
 
-有效 ACP `usage_update.size` 与角色 `contextPolicy.capacityTokens` 共同限制本角色的运行预算，按两者较小值生效；没有有效窗口数据时仍使用角色配置（缺省 32768），不宣称这是模型真实上限，也不自动扩大管理员配置。预留量、硬阈值、取消及压力退休继续生效。有效 ACP 占用数据可避免将本轮字符估算当作当前上下文占用；通知缺失或无效时仍使用原有保守估算，可能触发容量保护。需要更长会话时，应在核对所用模型窗口后设置该角色容量。
+ACP 没有本轮有效测量时，新增文本估算把连续 ASCII 字母、数字或下划线组成的 run 按段处理：长度不超过 32 且不满足“含数字并且长度至少 16”的 run，按 `ceil(字符数 / 3)` 计；长度超过 32，或含数字且长度至少 16 的 run，按完整字符数计。中文、符号及其他内容仍按 UTF-16 code unit 原数计；图片仍按每个已附图像帧 4096 计。此估算只用于 ACP fallback；有效 measured usage 优先，其他后端的旧 fallback 保持不变，已累计的旧 `estimated` 占用不因新规则缩小。它是生命周期管理的估算，不是 tokenizer，也不保证真实占用上界。
+
+有效 ACP `usage_update.size` 与角色 `contextPolicy.capacityTokens` 共同限制本角色的运行预算，按两者较小值生效；没有有效窗口数据时仍使用角色配置（缺省 32768），不宣称这是模型真实上限，也不自动扩大管理员配置。预留量、硬阈值、取消及压力退休继续生效。有效 ACP 占用数据可避免将本轮字符估算当作当前上下文占用；通知缺失或无效时会使用上述 ACP fallback，仍可能触发容量保护。容量、预留量和 `hardRatio` 不因该估算规则改变。需要更长会话时，应在核对所用模型窗口后设置该角色容量。
 
 隔离 profile 使用 CLI 1.4.11 实测可用的 `--gemini_dir`、`--app_data_dir` 参数，它们不是公开稳定 API。升级 CLI 前需重跑隔离验收；若参数、事件结构或 hook 行为变化，应停止使用该版本并更新适配器。框架不捆绑 Antigravity 二进制，不自动下载或升级它；Docker 也需自行准备可用的 CLI 与登录。连接检测读取模型目录，并非付费模型请求成功的证明。桥接关闭额外 G1 credits，模型仍会消耗账号已有额度。
 

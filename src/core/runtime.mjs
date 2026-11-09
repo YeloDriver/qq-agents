@@ -1089,14 +1089,11 @@ export class Runtime {
           }
         : { sourceRecordId: record.id, result };
     }
-    ctx.estimatedAdded =
-      (ctx.estimatedAdded || 0) +
-      JSON.stringify(args).length +
-      (result?.content
-        ? result.content
-            .filter((c) => c.type === "text")
-            .reduce((n, c) => n + c.text.length, 0)
-        : JSON.stringify(result ?? null).length);
+    this.contexts.estimate(ctx, JSON.stringify(args));
+    if (result?.content) {
+      for (const item of result.content)
+        if (item.type === "text") this.contexts.estimate(ctx, item.text);
+    } else this.contexts.estimate(ctx, JSON.stringify(result ?? null));
     return result;
   }
   assertDisclosure(ctx, { external = false } = {}) {

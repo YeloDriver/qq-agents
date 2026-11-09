@@ -132,7 +132,7 @@ export class TurnRunner {
       if (transcribing) await transcribing;
       const prepared = runtime.contexts.prepare(ctx, backend, reasons, tools);
       if (ctx.initialSession)
-        ctx.estimatedAdded += JSON.stringify(tools).length;
+        runtime.contexts.estimate(ctx, JSON.stringify(tools));
       // Keep the existing synchronous admission path when automatic media is off.
       const imageInput = a.behavior.imageInput.enabled
         ? await prepareMessageImages(
