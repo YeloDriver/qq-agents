@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
+import { temp } from "./helpers.mjs";
 import { antigravityHookAllowed } from "../src/backends/antigravity-guard.mjs";
 import { runAcp } from "../src/backends/antigravity-acp.mjs";
 import { AntigravityMedia } from "../src/backends/antigravity-media.mjs";
@@ -110,6 +114,149 @@ test("ACP preserves the terminal contract, refuses client capabilities, and avoi
   assert.equal(f.replies[1].error.code, -32601);
   assert(f.killed());
 });
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "EPERM") return true;
+    if (error.code === "ESRCH" || error.code === "EINVAL") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (processAlive(pid) && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  return !processAlive(pid);
+}
+
+async function cleanupOwnedFixture(pid) {
+  if (!Number.isSafeInteger(pid) || !processAlive(pid)) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // The fixture may exit between the liveness check and the signal.
+  }
+  await waitForProcessExit(pid);
+}
+
+async function exerciseWindowsCmd(t, mode) {
+  const root = temp(t),
+    workspace = path.join(root, "workspace with spaces"),
+    cliDirectory = path.join(root, "fake cli with spaces"),
+    settings = path.join(workspace, "settings with spaces.json"),
+    profile = path.join(workspace, "profile with spaces"),
+    command = path.join(cliDirectory, "fake agent.cmd"),
+    record = path.join(root, "fixture record.json"),
+    fixturePath = fileURLToPath(
+      new URL("./fixtures/antigravity-acp-cli.mjs", import.meta.url),
+    );
+  let fixturePid;
+  t.after(async () => {
+    if (!Number.isSafeInteger(fixturePid) && fs.existsSync(record))
+      fixturePid = JSON.parse(fs.readFileSync(record, "utf8")).fixturePid;
+    await cleanupOwnedFixture(fixturePid);
+  });
+  assert(workspace.includes(" "));
+  assert(settings.includes(" "));
+  assert(profile.includes(" "));
+  assert(command.includes(" "));
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(cliDirectory, { recursive: true });
+  fs.mkdirSync(profile);
+  fs.writeFileSync(settings, "{}\n");
+  fs.writeFileSync(
+    command,
+    `@echo off\r\n"${process.execPath}" "${fixturePath}" %*\r\nexit /b %ERRORLEVEL%\r\n`,
+  );
+
+  const envNames = [
+      "QQ_AGENTS_ACP_FIXTURE_RECORD",
+      "QQ_AGENTS_ACP_FIXTURE_MODE",
+      "QQ_AGENTS_ACP_FIXTURE_HOLD_MS",
+    ],
+    previousEnv = new Map(envNames.map((name) => [name, process.env[name]]));
+  process.env.QQ_AGENTS_ACP_FIXTURE_RECORD = record;
+  process.env.QQ_AGENTS_ACP_FIXTURE_MODE = mode;
+  process.env.QQ_AGENTS_ACP_FIXTURE_HOLD_MS = "30000";
+  const events = [];
+  try {
+    const run = runAcp(
+      { ...options, command, settings, workspace, profile },
+      "synthetic prompt",
+      (event) => events.push(event),
+    );
+    if (mode === "protocol-failure")
+      await assert.rejects(run, /^Error: ANTIGRAVITY_PROTOCOL_ERROR$/);
+    else await run;
+  } finally {
+    for (const [name, value] of previousEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  const result = JSON.parse(fs.readFileSync(record, "utf8"));
+  fixturePid = result.fixturePid;
+  assert(Number.isSafeInteger(fixturePid));
+  assert.equal(result.mode, mode);
+  assert.deepEqual(result.argv, [
+    "--settings",
+    settings,
+    "acp",
+    "--agent",
+    "qq-agents",
+    "--gemini-dir",
+    profile,
+    "--app-data-dir",
+    "cli",
+    "--include-default-customizations=false",
+    "--disable-telemetry",
+  ]);
+  assert.deepEqual(result.methods, [
+    "initialize",
+    "session/new",
+    "session/set_model",
+    "session/set_config_option",
+    "session/prompt",
+  ]);
+  assert.equal(result.requests[1].params.cwd, workspace);
+  assert.equal(result.requests[2].params.modelId, options.model);
+  assert.equal(result.requests[3].params.value, options.effort);
+  assert.deepEqual(result.requests.at(-1).params.prompt, [
+    { type: "text", text: "synthetic prompt" },
+  ]);
+  assert.deepEqual(result.serverReplies, [
+    { id: "permission", result: { outcome: { outcome: "cancelled" } } },
+    {
+      id: "file",
+      error: { code: -32601, message: "Client capability unavailable" },
+    },
+  ]);
+  if (mode === "success") {
+    assert.equal(events[0].conversation_id, id);
+    assert.equal(events.at(-1).result.status, "SUCCESS");
+  } else {
+    assert(!events.some((event) => event.event === "result"));
+    assert.equal(await waitForProcessExit(fixturePid), true);
+  }
+  assert.equal(await waitForProcessExit(fixturePid), true);
+}
+
+test(
+  "ACP cleans up the Windows cmd CLI tree after success and protocol failure",
+  { skip: process.platform !== "win32" && "Windows cmd entry point" },
+  async (t) => {
+    await t.test("normal terminal", (subtest) =>
+      exerciseWindowsCmd(subtest, "success"),
+    );
+    await t.test("protocol failure", (subtest) =>
+      exerciseWindowsCmd(subtest, "protocol-failure"),
+    );
+  },
+);
 test("ACP resumes only the supplied session and sets the configured model and effort", async () => {
   const f = fake();
   await runAcp({ ...options, session: id }, "next", () => {}, f.launch);

@@ -1,20 +1,24 @@
 // @ts-check
-import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import crossSpawn from "cross-spawn";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const LIMIT = 128 * 1024 * 1024;
 /** Translate ACP into the existing supervisor's terminal protocol. The supervisor
  * still owns tool authorization, cancellation, session binding and send settlement.
  * @param {any} options @param {string} prompt
- * @param {(event: any) => void} emit @param {typeof spawn} [launch]
+ * @param {(event: any) => void} emit @param {typeof crossSpawn} [launch]
  * @param {import("./session-contract.mjs").InputImage[]} [inputImages] */
 export async function runAcp(
   options,
   prompt,
   emit,
-  launch = spawn,
+  launch = crossSpawn,
   inputImages = [],
 ) {
+  // Windows CLI installations expose .cmd shims. Use the argv-aware launcher
+  // already used by headless instead of native spawn, which rejects those shims.
   const child = launch(
     options.command,
     [
@@ -41,6 +45,35 @@ export async function runAcp(
     buffer = "",
     bytes = 0,
     closed = false;
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    if (
+      process.platform === "win32" &&
+      Number.isInteger(child.pid) &&
+      child.exitCode === null &&
+      child.signalCode === null
+    ) {
+      try {
+        // A .cmd shim adds a wrapper; stopping only it would orphan the CLI.
+        // Only this live, owned child may authorize termination of its tree.
+        execFileSync(
+          path.join(
+            process.env.SystemRoot || "C:\\Windows",
+            "System32",
+            "taskkill.exe",
+          ),
+          ["/pid", String(child.pid), "/T", "/F"],
+          { stdio: "ignore", windowsHide: true, timeout: 10000 },
+        );
+        return;
+      } catch {
+        // Preserve the original fallback if Windows refuses tree termination.
+      }
+    }
+    child.kill();
+  };
   /** @type {Map<number, {resolve: (value: any) => void, reject: (error: Error) => void}>} */
   const pending = new Map();
   const fail = () => {
@@ -48,7 +81,7 @@ export async function runAcp(
     for (const item of pending.values())
       item.reject(Error("ANTIGRAVITY_PROTOCOL_ERROR"));
     pending.clear();
-    child.kill();
+    stop();
   };
   child.once("error", fail);
   child.once("close", fail);
@@ -197,7 +230,7 @@ export async function runAcp(
   } finally {
     clearTimeout(timer);
     child.stdin?.end();
-    child.kill();
+    stop();
   }
 }
 
