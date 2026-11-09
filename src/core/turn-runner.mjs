@@ -1,3 +1,5 @@
+import { startTypingIndicator } from "./typing-indicator.mjs";
+import { prepareMessageImages } from "./message-images.mjs";
 import { randomUUID } from "node:crypto";
 import { SUBJECT } from "./lifecycle.mjs";
 import { toolSpecs } from "../tools/specs.mjs";
@@ -37,7 +39,32 @@ export class TurnRunner {
   constructor(runtime) {
     this.runtime = runtime;
   }
-  async runTurn(agentId, conversation, { reasons = [] } = {}) {
+  async runTurn(agentId, conversation, { reasons = [], timingId } = {}) {
+    if (conversation !== SUBJECT) this.runtime.socialRuntime?.preempt(agentId);
+    const release =
+      conversation === SUBJECT
+        ? this.runtime.subjectExecution.acquire(agentId, {})
+        : () => {};
+    if (!release) return { status: "queued" };
+    try {
+      const result = await this.runOrdinaryTurn(agentId, conversation, {
+        reasons,
+        timingId,
+      });
+      if (!result) this.runtime.messageTiming?.finish(timingId, "skipped");
+      return result;
+    } catch (error) {
+      this.runtime.messageTiming?.finish(timingId, "failed");
+      throw error;
+    } finally {
+      release();
+    }
+  }
+  async runOrdinaryTurn(
+    agentId,
+    conversation,
+    { reasons = [], timingId } = {},
+  ) {
     const runtime = this.runtime;
     if (runtime.closed) throw Error("RUNTIME_CLOSING");
     const a = runtime.agent(agentId);
@@ -59,6 +86,7 @@ export class TurnRunner {
     const ctx = runtime.makeContext(agentId, conversation),
       { token, controller } = ctx;
     ctx.freshSubject = freshSubject;
+    ctx.messageTimingId = timingId;
     let resolveDone;
     ctx.done = new Promise((resolve) => {
       resolveDone = resolve;
@@ -81,6 +109,8 @@ export class TurnRunner {
       );
     ctx.allowedTools = runtime.toolsFor(a, conversation);
     runtime.running.set(runKey, ctx);
+    runtime.messageTiming?.mark(timingId, "processingStarted");
+    runtime.conversations.timing?.occupy(agentId, conversation);
     const state = mem.state(conversation);
     state.lastWakeAt = runtime.now();
     state.pendingWake = false;
@@ -103,7 +133,21 @@ export class TurnRunner {
       const prepared = runtime.contexts.prepare(ctx, backend, reasons, tools);
       if (ctx.initialSession)
         ctx.estimatedAdded += JSON.stringify(tools).length;
+      // Keep the existing synchronous admission path when automatic media is off.
+      const imageInput = a.behavior.imageInput.enabled
+        ? await prepareMessageImages(
+            runtime,
+            ctx,
+            backend.config
+              ? backend
+              : runtime.config.backends.find((b) => b.id === a.backendId),
+            prepared,
+          )
+        : { images: [], beforeSubmit() {}, submitted() {} };
+      runtime.assertActive(ctx);
       await this.runBackend(ctx, backend, {
+        inputImages: imageInput.images,
+        beforeInputSubmitted: imageInput.beforeSubmit,
         agent: a,
         conversation,
         prompt: prepared.prompt,
@@ -132,8 +176,13 @@ export class TurnRunner {
           }),
         onBackendTurn: (reference) =>
           !runtime.stopped && recordBackendTurn(mem, ctx.turnId, reference),
-        onInputSubmitted: () =>
-          !runtime.stopped && recordInputSubmission(mem, ctx.turnId),
+        onInputSubmitted: () => {
+          if (!runtime.stopped) {
+            runtime.messageTiming?.mark(timingId, "backendInputSubmitted");
+            imageInput.submitted();
+            recordInputSubmission(mem, ctx.turnId);
+          }
+        },
         onTiming: (timing) =>
           !runtime.stopped && recordBackendTiming(mem, ctx.turnId, timing),
         onDiagnostic: (event, attempt) =>
@@ -219,6 +268,7 @@ export class TurnRunner {
             runtime.scheduler.finish(agentId, reason.taskRunId, outcome);
         // Allow the next queued wake to start; ctx.done still covers all finalization.
         runtime.running.delete(runKey);
+        runtime.conversations.timing?.release(agentId, conversation);
         if (
           !controller.signal.aborted &&
           !runtime.closed &&
@@ -228,7 +278,20 @@ export class TurnRunner {
           runtime.conversations.finish(ctx);
       } finally {
         clearTimeout(timer);
-        if (runtime.running.get(runKey) === ctx) runtime.running.delete(runKey);
+        if (runtime.running.get(runKey) === ctx) {
+          runtime.running.delete(runKey);
+          runtime.conversations.timing?.release(agentId, conversation);
+        }
+        if (timingId !== undefined) {
+          runtime.messageTiming.mark(timingId, "turnFinished");
+          if (ctx.pendingDeliveries) ctx.messageTimingTerminal = outcome;
+          else
+            runtime.messageTiming.finishTurn(
+              timingId,
+              outcome,
+              ctx.messageTimingToolOutcome,
+            );
+        }
         resolveDone();
       }
     }
@@ -270,6 +333,7 @@ export class TurnRunner {
     const runtime = this.runtime;
     const mem = runtime.memory.bind(ctx.agentId);
     let recoveryStarted = false;
+    const stopTyping = startTypingIndicator(runtime, ctx);
     try {
       const result = await runWithRecovery(backend, params, {
         onFailure: (error, attempt) => {
@@ -325,6 +389,8 @@ export class TurnRunner {
         !ctx.controller.signal.aborted &&
         runtime.capabilities.has(ctx.token);
       throw error;
+    } finally {
+      stopTyping();
     }
   }
 }

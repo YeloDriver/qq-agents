@@ -1,5 +1,7 @@
 // @ts-check
+import { closeSocialSessions } from "./social-sessions.mjs";
 import fs from "node:fs";
+import { runNativeSocial } from "./native-social.mjs";
 import path from "node:path";
 import { NodeApiClient, unwrap } from "../../vendor/dsh-qq/dsh-client.js";
 import { resolveDshInstance } from "./dsh-discovery.mjs";
@@ -219,10 +221,40 @@ export class DshBackend {
   acceptsSession(session, tools, previous) {
     return acceptsSession(this, session, tools, previous);
   }
+  /** @param {{windowId?: string, actorGeneration?: string}} [filter] */
+  async closeSocialSessions(filter = {}) {
+    await closeSocialSessions(this, filter);
+  }
+  /** @param {any} params */
+  async runSocial(params) {
+    if (
+      this.config.preset !== "qq-unified" ||
+      typeof params.socialContextToken !== "string" ||
+      params.socialContextToken.length < 20
+    )
+      throw Error("SOCIAL_BACKEND_UNSUPPORTED");
+    return runNativeSocial(
+      this,
+      {
+        ...params,
+        prompt: `${params.prompt}\n本轮唯一有效的能力凭据 context=${params.socialContextToken}。历史中的context均已失效；只复制本轮这一个值用于bridge_tools/bridge_call外层，不得披露。`,
+      },
+      async (session) => {
+        if (!session) return;
+        try {
+          const client = await this.ready();
+          await client.stopSessionWork(session.id);
+        } catch {
+          throw Error("SOCIAL_CONTEXT_FINALIZATION_FAILED");
+        }
+      },
+    );
+  }
   /** @param {RunParams} params */
   async run({
     conversation,
     prompt,
+    inputImages = [],
     instructions,
     onUsage,
     signal,
@@ -231,6 +263,7 @@ export class DshBackend {
     saveSession,
     onBackendTurn,
     onInputSubmitted,
+    beforeInputSubmitted,
     recovery,
   }) {
     const signature = this.sessionSignature(tools);
@@ -337,6 +370,8 @@ export class DshBackend {
       if (signal.aborted) throw Error("ABORTED");
       if (recovery && !dshRecoveryReady(snapshot, recovery))
         throw Error("DSH_RECOVERY_STATE_UNVERIFIED");
+      await beforeInputSubmitted?.();
+      if (signal.aborted) throw Error("ABORTED");
       onInputSubmitted?.();
       unwrap(
         await client.sessions.prompt({
@@ -350,6 +385,18 @@ export class DshBackend {
                   ? instructions + "\n\n" + prompt
                   : prompt,
             },
+            ...inputImages.flatMap((image) => [
+              { type: /** @type {const} */ ("text"), text: image.label },
+              ...(image.data
+                ? [
+                    {
+                      type: /** @type {const} */ ("image"),
+                      mediaType: /** @type {"image/jpeg"} */ (image.mimeType),
+                      data: image.data,
+                    },
+                  ]
+                : []),
+            ]),
           ],
         }),
         "prompt",
@@ -434,6 +481,7 @@ export class DshBackend {
   async close() {
     this.closing = true;
     await this.cancel();
+    await this.closeSocialSessions();
     this.streamAbort?.abort();
     await this.pump;
     await this.external.close();

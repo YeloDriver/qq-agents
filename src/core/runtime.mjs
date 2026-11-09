@@ -1,6 +1,16 @@
 import { QzoneApprovals } from "./qzone-approvals.mjs";
+import { SubjectExecution } from "./subject-execution.mjs";
+import { SocialRuntime } from "../home/social-runtime.mjs";
 import { HOME_TOOLS } from "../home/policy.mjs";
 import { HomeService } from "../home/service.mjs";
+import {
+  assertNoSocialDisclosure,
+  socialSources,
+  socialContextAllowed,
+  assertSocialSend,
+  trackSocial,
+  assertRoomItemShareable,
+} from "./social-protection.mjs";
 import { contextProtection } from "./protected-mind.mjs";
 import {
   peerQzoneSources,
@@ -15,6 +25,9 @@ import { containsCredential } from "./secrets.mjs";
 import { sessionReference, recordRetirementCause } from "./session-records.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { DeliveryService } from "./delivery.mjs";
+import { recoverDraftArchives } from "./draft-delivery.mjs";
+import { QQDraftStore } from "../memory/qq-drafts.mjs";
+import { attachReviewOriginals } from "./input-review.mjs";
 import { TurnRunner } from "./turn-runner.mjs";
 import { runtimeStatus } from "./runtime-status.mjs";
 import { observeInput } from "./input-progress.mjs";
@@ -55,6 +68,11 @@ import { TaskScheduler } from "./scheduler.mjs";
 import { Operations } from "./operations.mjs";
 import { VoiceTranscription } from "./voice-transcription.mjs";
 import { MaintenanceDrain } from "./maintenance.mjs";
+import {
+  isTimedSendTool,
+  timedDeliveryFailure,
+  timedStoppedSend,
+} from "./message-timing-runtime.mjs";
 
 // Adds or removes a feature's tools while keeping the existing order, so saving
 // an unchanged permission page does not count as a policy change.
@@ -85,6 +103,7 @@ export class Runtime {
     clock = () => new Date(),
     random = Math.random,
     diagnostics = new Diagnostics(),
+    messageTiming = undefined,
   }) {
     Object.assign(this, {
       configStore,
@@ -94,6 +113,7 @@ export class Runtime {
       clock,
       random,
       diagnostics,
+      messageTiming,
     });
     this.transports = new Map();
     this.connecting = new Set();
@@ -103,6 +123,7 @@ export class Runtime {
     // Replaced by main.mjs when the console starts with `--live --resume`.
     this.autoResume = new AutoResume(this);
     this.running = new Map();
+    this.subjectExecution = new SubjectExecution();
     this.pending = new Map();
     this.capabilities = new Map();
     this.faults = new Map();
@@ -113,6 +134,7 @@ export class Runtime {
     this.configDrain = null;
     this.reconfiguringAgents = new Set();
     this.reconfiguringConnections = new Set();
+    this.drafts = new QQDraftStore(memory, { clock: () => this.now() });
     this.delivery = new DeliveryService(this);
     this.sendChains = this.delivery.chains;
     this.maintenance = new MaintenanceDrain(this);
@@ -132,6 +154,16 @@ export class Runtime {
       this.contexts.upgradeInstructions(a, self);
     }
     this.home = new HomeService(this);
+    this.homeSocialSources = {
+      assertSend: assertSocialSend,
+      trackSource: trackSocial,
+      assertRoomItem: assertRoomItemShareable,
+      sources: socialSources,
+      allowed: socialContextAllowed,
+    };
+    this.socialSourceAllowed = socialContextAllowed;
+    this.homeSocial = this.home.social;
+    this.socialRuntime = new SocialRuntime(this);
     this.qzoneApprovals = new QzoneApprovals(this);
     this.banter = new BanterCoordinator({
       botIds: this.config.connections.map((c) => c.accountId),
@@ -163,8 +195,23 @@ export class Runtime {
     tracked.then(() => this.jobs.delete(tracked));
     return tracked;
   }
+  // Constructing another service client is not a process restart. The owning
+  // entry point runs this barrier before exposing APIs or starting dispatch.
+  initializeRuntime() {
+    if (this.runtimeInitialized) return { initialized: false };
+    if (this.closed) throw Error("RUNTIME_CLOSING");
+    if (this.homeSocial) this.homeSocial.store.interruptRuntime(randomUUID());
+    try {
+      recoverDraftArchives(this.memory, this.drafts);
+    } catch (error) {
+      this.diagnostics.report(error, { component: "runtime" });
+    }
+    this.runtimeInitialized = true;
+    return { initialized: true };
+  }
   startTimers() {
     if (this.closed || this.ticker) return;
+    this.initializeRuntime();
     this.ticker = setInterval(() => {
       try {
         this.tick();
@@ -179,6 +226,7 @@ export class Runtime {
   }
   tick() {
     if (this.closed) return;
+    this.messageTiming?.sweep();
     try {
       this.games.tick();
       this.faults.delete("games");
@@ -188,7 +236,19 @@ export class Runtime {
         component: "games",
       });
     }
-    if (this.maintenance.active) return;
+    if (
+      this.homeSocial?.maintain &&
+      (!this.nextSocialMaintenanceAt ||
+        this.now() >= this.nextSocialMaintenanceAt)
+    ) {
+      this.homeSocial.maintain();
+      this.nextSocialMaintenanceAt = this.now() + 60000;
+    }
+    if (this.maintenance.active) {
+      this.socialRuntime?.stop("maintenance");
+      return;
+    }
+    if (this.homeSocial) this.socialRuntime.tick();
     if (!this.nextCursorCleanupAt || this.now() >= this.nextCursorCleanupAt) {
       new AppCursors(this.memory).cleanup(this.now());
       this.nextCursorCleanupAt = this.now() + 60000;
@@ -214,8 +274,17 @@ export class Runtime {
       !this.protectedWork.active(agentId, conversation)
     )
       throw Error("PROTECTED_WORK_NOT_ACTIVE");
-    const recallGeneration =
-      mem.state(conversation).recallRecovery?.generation || 0;
+    const state = mem.state(conversation);
+    const recallGeneration = state.recallRecovery?.generation || 0;
+    // Inherit the old read cursor once. New read marks remain independent of
+    // the send review, including when the next turn opens another context.
+    if (
+      /^(group|private):/.test(conversation) &&
+      state.inputReviewFromSeq === undefined
+    ) {
+      state.inputReviewFromSeq = state.readThroughSeq || 0;
+      mem.setState(conversation, state);
+    }
     const ctx = {
       token: randomBytes(32).toString("base64url"),
       agentId,
@@ -227,6 +296,8 @@ export class Runtime {
       grants: new Set(),
       sendCount: 0,
       replyBatchSends: mem.state(conversation).replyBatchSends || 0,
+      reviewReadSeq: state.inputReviewFromSeq || 0,
+      reviewSentSeq: state.inputReviewThroughSeq || 0,
       inputBaseline: Math.max(
         mem.state(conversation).readThroughSeq || 0,
         mem.state(conversation).replyInputSeq || 0,
@@ -237,6 +308,8 @@ export class Runtime {
       shownSeq: 0,
     };
     ctx.persistTaint = () => {
+      for (const marker of socialSources(this, ctx))
+        ctx.privateRead.add(marker);
       for (const id of peerQzoneSources(this, ctx))
         ctx.privateRead.add(peerQzoneMarker(id));
       const current = mem.state(conversation);
@@ -280,6 +353,12 @@ export class Runtime {
     return c;
   }
   toolsFor(a, conversation) {
+    if (conversation?.startsWith("@social:"))
+      return this.config.homeSocial?.enabled
+        ? this.socialRuntime
+            .tools({ conversation })
+            .filter((n) => toolAvailable(a, n, conversation))
+        : [];
     if (isWorkScope(conversation))
       return this.protectedWork.tools(a, conversation);
     const selected =
@@ -316,6 +395,8 @@ export class Runtime {
               ...BOARD_TOOLS,
             ]),
           ];
+    if (conversation === SUBJECT && this.config.homeSocial?.enabled)
+      selected.push("home_social_capabilities", "home_social_process");
     const imageGeneration = backendCapabilities(
       this.config.backends.find((b) => b.id === a.backendId)?.type,
     ).imageGeneration;
@@ -332,6 +413,7 @@ export class Runtime {
     // Revising writes a new text file under the same create permission and
     // keeps the old one, so it goes with file_create, including older configs.
     if (selected.includes("file_create")) selected.push("file_revise");
+    if (toolAvailable(a, "qq_draft", conversation)) selected.push("qq_draft");
     if (conversation !== SUBJECT && selected.includes("qq_send"))
       selected.push("qq_delivery_status");
     selected.push(...HOME_TOOLS);
@@ -365,6 +447,16 @@ export class Runtime {
     if (conversation === SUBJECT) {
       if (!codes.length && !this.subject.internalAllowed(a))
         codes.push("SUBJECT_NOT_ALLOWED");
+      return codes;
+    }
+    if (
+      ctx?.runtimeKind === "subject-social" &&
+      conversation?.startsWith("@social:")
+    ) {
+      if (this.config.mode !== "live") codes.push("ISOLATED_MODE");
+      if (this.config.globalPaused) codes.push("GLOBAL_PAUSED");
+      if (a.paused) codes.push("AGENT_PAUSED");
+      if (!this.config.homeSocial?.enabled) codes.push("SOCIAL_DISABLED");
       return codes;
     }
     if (this.config.mode !== "live") codes.push("ISOLATED_MODE");
@@ -596,6 +688,7 @@ export class Runtime {
   }
   async ingestEvent(connectionId, raw) {
     if (this.closed) throw Error("RUNTIME_CLOSING");
+    const receivedAt = this.messageTiming?.clock();
     const c = this.connection(connectionId),
       e = normalizeEvent(raw, c);
     if (!e) return { ignored: true };
@@ -633,6 +726,9 @@ export class Runtime {
       }
       if (ownEcho)
         mem.reconcileFromEcho({
+          connectionId,
+          accountId: c.accountId,
+          namespace: c.messageIdNamespace || "onebot",
           conversation: e.conversation,
           segments: e.segments,
           text: e.segments
@@ -743,8 +839,10 @@ export class Runtime {
       const reason = this.conversations.reason(a, e, c.accountId, archived),
         addressed = this.conversations.addressed(a, e, c.accountId);
       if (voice) voice.reason = reason;
+      const inboundAt =
+        redactConfirmation || redactGame ? undefined : receivedAt;
       if (!reason) {
-        this.conversations.extend(a.id, e.conversation, e.senderId);
+        this.conversations.extend(a.id, e.conversation, e.senderId, inboundAt);
         continue;
       }
       if (!this.writable(a, e.conversation)) {
@@ -758,6 +856,7 @@ export class Runtime {
           senderId: e.senderId,
           addressed,
           direct: this.conversations.direct(a, e, c.accountId, archived),
+          inboundAt,
         });
         continue;
       }
@@ -766,6 +865,7 @@ export class Runtime {
         senderId: e.senderId,
         addressed,
         direct: this.conversations.direct(a, e, c.accountId, archived),
+        inboundAt,
       });
       results.push({ agentId: a.id, ...wake });
     }
@@ -861,6 +961,10 @@ export class Runtime {
   async runTool(ctx, name, args = {}) {
     const startedAt = Date.now(),
       calls = (ctx.toolCalls ||= []);
+    const tracedSend =
+      ctx.messageTimingId !== undefined && isTimedSendTool(name, args);
+    if (tracedSend)
+      this.messageTiming.mark(ctx.messageTimingId, "sendRequested");
     try {
       // Reserved before any await, so concurrent calls share one budget.
       if (ctx.conversation === SUBJECT && name !== "subject_log") {
@@ -870,10 +974,18 @@ export class Runtime {
         ctx.subjectToolReservations = (ctx.subjectToolReservations || 0) + 1;
       }
       const result = await this.executeTool(ctx, name, args);
+      if (tracedSend && result?.status === "stopped") {
+        const reason = timedStoppedSend(result, ctx.controller.signal.aborted);
+        ctx.messageTimingToolOutcome = reason;
+        this.messageTiming.stop(ctx.messageTimingId, reason);
+      }
       if (calls.length < 50)
         calls.push({ name, ok: true, ms: Date.now() - startedAt });
       return result;
     } catch (error) {
+      attachReviewOriginals(this, ctx, error);
+      if (tracedSend)
+        ctx.messageTimingToolOutcome = timedDeliveryFailure(error);
       if (calls.length < 50)
         calls.push({
           name,
@@ -888,8 +1000,11 @@ export class Runtime {
   }
   async executeTool(ctx, name, args = {}) {
     const a = this.assertActive(ctx);
+    if (ctx.runtimeKind === "subject-social")
+      this.socialRuntime.assertToolAllowed(ctx, name);
     for (const repo of privateGithubSources(ctx, this))
       ctx.privateRead.add(githubMarker(repo));
+    for (const marker of socialSources(this, ctx)) ctx.privateRead.add(marker);
     for (const id of peerQzoneSources(this, ctx))
       ctx.privateRead.add(peerQzoneMarker(id));
     ctx.persistTaint?.();
@@ -985,10 +1100,12 @@ export class Runtime {
     return result;
   }
   assertDisclosure(ctx, { external = false } = {}) {
+    assertNoSocialDisclosure(this, ctx);
     if (this.protectedWork?.context(ctx))
       throw Error("PROTECTED_WORK_OUTBOUND_DENIED");
     for (const repo of privateGithubSources(ctx, this))
       ctx.privateRead.add(githubMarker(repo));
+    for (const marker of socialSources(this, ctx)) ctx.privateRead.add(marker);
     for (const id of peerQzoneSources(this, ctx))
       ctx.privateRead.add(peerQzoneMarker(id));
     ctx.persistTaint?.();

@@ -184,6 +184,16 @@ const AGENT_TOOL_GROUPS = [
     },
   },
   {
+    id: "chat-drafts",
+    builtin: true,
+    builtinLabel: "随对应聊天发送权限提供",
+    title: "待发草稿",
+    desc: "查看当前聊天尚未发出的稿件。显式继续时仍要通过原有发送权限和输入审阅。",
+    tools: {
+      qq_draft: "查看、修改、放弃或继续待发草稿",
+    },
+  },
+  {
     id: "framework",
     builtin: true,
     title: "框架自查",
@@ -214,6 +224,35 @@ const AGENT_TOOL_GROUPS = [
       room_publish_snapshot: "主人格发布项目文字快照",
       room_retract: "主人格撤回文字",
       room_operation_status: "查询历史操作回执",
+    },
+  },
+  {
+    id: "home-social",
+    builtin: true,
+    builtinLabel: "由实例社交与角色参与开关共同控制",
+    title: "小窝往来",
+    desc: "普通主体只查看安全数量并选择独立处理；邀请、接受与发言在专用社交回合中完成。默认双方合计12回合，一方执行一次计1回合；可用现有本机后端，不要求token硬预算，不发送QQ。",
+    tools: {
+      home_social_capabilities: "查看社交许可与后端支持",
+      home_social_process: "排队独立异步处理",
+      home_visit_invite: "邀请或申请拜访",
+      home_visit_inbox: "读取当前往来列表",
+      home_visit_invitation_read: "读取绑定邀请",
+      home_visit_decide: "自主决定邀请",
+      home_visit_read: "读取拜访消息",
+      home_visit_mark_read: "确认实际已读水位",
+      home_visit_send: "提交本人社交消息",
+      home_visit_end: "结束拜访",
+      home_visit_retract: "撤回本人消息",
+      home_visit_room_read: "读取临时获准房间",
+      home_visit_grant_reduce: "缩小房间授权",
+      home_social_block: "设置往来屏蔽",
+      home_social_operation_read: "核对原请求回执",
+      home_exchange_propose: "提议有界交流时段",
+      home_exchange_decide: "确认精确时段条款",
+      home_exchange_status: "查看时段与额度",
+      home_exchange_yield: "封口本轮消息批次",
+      home_exchange_close: "关闭交流时段",
     },
   },
   {
@@ -571,6 +610,19 @@ const agentForm = {
       ) +
       advanced(
         this.foldTitle(
+          "新消息自动看图",
+          row.behavior?.imageInput?.enabled ? "已开启" : "已关闭",
+        ),
+        '<input type="hidden" name="imageInputPresent" value="1">' +
+          check(
+            "imageInputEnabled",
+            "将新消息图片预览随文字交给模型",
+            row.behavior?.imageInput?.enabled,
+          ) +
+          '<p class="hint">支持 DSH、Codex 和 Antigravity ACP，仍需允许 qq_image_read。每回合默认最多 4 张画面、最长边 1280 像素，GIF 默认采样 2 帧；原图和后续帧可按需读取。历史回放不重复附图，失败或超限会明确标注。自动附图会增加模型图片用量。</p>',
+      ) +
+      advanced(
+        this.foldTitle(
           "别处近况",
           row.behavior?.elsewhere?.enabled === false
             ? "已关闭"
@@ -734,6 +786,11 @@ const agentForm = {
         ),
         '<input type="hidden" name="homeSettingsShown" value="1">' +
           check("homeEnabled", "启用小窝读取和主人格布置", row.home?.enabled) +
+          check(
+            "homeSocialEnabled",
+            "允许主体自主参与小窝社交（仍需实例启用和双方同意）",
+            row.home?.social?.enabled ?? false,
+          ) +
           check(
             "homeSceneView",
             "允许受控场景图片读取（需要本机 Chromium）",
@@ -1383,6 +1440,12 @@ const agentForm = {
             original.behavior?.actions?.qzoneMaxPerDay,
           ),
         },
+        imageInput: {
+          ...original.behavior?.imageInput,
+          enabled: f.has("imageInputPresent")
+            ? f.has("imageInputEnabled")
+            : original.behavior?.imageInput?.enabled,
+        },
         // A form without these fields keeps the stored switch and window.
         elsewhere: {
           ...original.behavior?.elsewhere,
@@ -1498,6 +1561,10 @@ const agentForm = {
         ? {
             home: {
               enabled: f.has("homeEnabled"),
+              ...(original.home?.social !== undefined ||
+              f.has("homeSocialEnabled")
+                ? { social: { enabled: f.has("homeSocialEnabled") } }
+                : {}),
               sceneView: { enabled: f.has("homeSceneView") },
               publishing: f.has("homePublishing"),
               projectSnapshots: { enabled: f.has("homeProjectSnapshots") },

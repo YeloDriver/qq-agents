@@ -38,6 +38,8 @@ import { elsewhereForTurn } from "./elsewhere.mjs";
 import { floorForTurn } from "./floor.mjs";
 import { taskBrief } from "./scheduler.mjs";
 import { recallBoundary, recallPage } from "./recall-boundary.mjs";
+import { recordReviewPresentation } from "./input-review.mjs";
+import { draftHints } from "../tools/qq-drafts.mjs";
 import {
   retireSession,
   sessionReference,
@@ -97,6 +99,12 @@ function dropRepeats(handoff, history, materials, schedule) {
     handoff.scheduled = handoff.scheduled.filter(
       (t) => !schedule.listed.includes(t.id),
     );
+}
+function draftPrompt(runtime, ctx) {
+  const page = draftHints(runtime, ctx);
+  return page.items.length || page.nextOffset !== null
+    ? `本聊天待处理草稿（qq_draft 查看原稿、修改、放弃或显式继续；已发送和未知项不可重发）：${JSON.stringify(page)}`
+    : "";
 }
 export class ContextLifecycle {
   constructor(runtime) {
@@ -713,6 +721,7 @@ export class ContextLifecycle {
         ? `你和这些人之间还没了结的事（你自己用 person_item 记下的）：boundary 是对方的相处边界，照着调整；promise 是你答应对方的事，做到了就回来交代，做不成就坦白，交代后用 person_item 关掉；shared 是一起经历过的事，合适时自然接回来，不必硬提。fromPrivate 的记在别的私聊里，只用来调整你自己的做法，不要在这里提起内容。${JSON.stringify({ items: between.items, ...(Object.keys(between.more).length ? { more: between.more } : {}) })}`
         : "",
     ];
+    const openingHistory = chatHistory(history);
     const prompt = (
       !/^(group|private):/.test(ctx.conversation)
         ? [
@@ -737,8 +746,9 @@ export class ContextLifecycle {
               replay.earlierOmitted)
               ? `最近对话（历史回放）：${JSON.stringify(replay)}`
               : "",
-            `新增消息：${JSON.stringify(chatHistory(history))}`,
+            `新增消息：${JSON.stringify(openingHistory)}`,
             ...chatStatus(r, ctx, history, handoff),
+            ctx.allowedTools?.includes("qq_draft") ? draftPrompt(r, ctx) : "",
             ...details,
             handoff
               ? `程序交接状态：${JSON.stringify(chatHandoff(handoff, { replay: !!replay }))}`
@@ -749,6 +759,15 @@ export class ContextLifecycle {
     )
       .filter(Boolean)
       .join("\n\n");
+    recordReviewPresentation(
+      r,
+      ctx,
+      openingHistory.items.map((item) => ({
+        ...item,
+        conversation: ctx.conversation,
+      })),
+    );
+    ctx.openingReviewInput = new Map(ctx.presentedReviewInput);
     m.setState(ctx.conversation, {
       ...m.state(ctx.conversation),
       loadedSelfVersion: self.version,
@@ -830,7 +849,12 @@ export class ContextLifecycle {
     });
     ctx.estimatedAdded =
       prompt.length + (ctx.initialSession ? instructions.length : 0);
-    return { instructions, prompt, session: s.session };
+    return {
+      instructions,
+      prompt,
+      session: s.session,
+      newMessages: history.items,
+    };
   }
   usage(ctx, value) {
     const m = this.runtime.memory.bind(ctx.agentId),
@@ -943,12 +967,15 @@ export class ContextLifecycle {
     if (!usage || usage.at < ctx.turnStartedAt)
       usage = {
         source: "estimated",
-        contextTokens: (s.usage?.contextTokens || 0) + ctx.estimatedAdded,
+        contextTokens:
+          (s.usage?.contextTokens || 0) +
+          ctx.estimatedAdded +
+          (ctx.estimatedImageTokens || 0),
         capacityTokens:
           s.usage?.capacityTokens || a.contextPolicy.capacityTokens,
         at: r.now(),
         basis:
-          "tracked text characters plus tool output; conservative estimate, excludes unknown backend overhead",
+          "tracked text characters plus tool output and image allowance; conservative estimate, excludes unknown backend overhead",
       };
     const capacity =
       usage.capacityTokens > 0

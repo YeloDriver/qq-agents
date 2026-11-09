@@ -1,5 +1,5 @@
 // @ts-check
-// @ts-check
+import { HOME_SOCIAL_DEFAULTS } from "../home/social-policy.mjs";
 // Runtime defaults are source code; examples are generated documentation.
 import { validateConfig } from "./config.mjs";
 
@@ -28,6 +28,7 @@ export function defaultConfig() {
     mode: "isolated",
     port: 3210,
     globalPaused: true,
+    homeSocial: { ...HOME_SOCIAL_DEFAULTS },
     privateLikeGroups: [],
     games: {
       enabled: false,
@@ -94,6 +95,7 @@ export function defaultConfig() {
         home: {
           enabled: false,
           publishing: false,
+          social: { enabled: false },
           sceneView: { enabled: false },
           projectSnapshots: { enabled: false },
           maxWritesPerDay: 20,
@@ -117,6 +119,14 @@ export function defaultConfig() {
         // Two agents on two QQ accounts can tell each other's owners when one
         // goes offline; the administrator turns it on per agent.
         behavior: {
+          imageInput: {
+            enabled: false,
+            maxImages: 4,
+            maxEdge: 1280,
+            maxBytes: 4194304,
+            timeoutMs: 6000,
+            animationFrames: 2,
+          },
           elsewhere: {
             enabled: true,
             windowMs: 21600000,
@@ -180,6 +190,7 @@ export function defaultConfig() {
         home: {
           enabled: false,
           publishing: false,
+          social: { enabled: false },
           sceneView: { enabled: false },
           projectSnapshots: { enabled: false },
           maxWritesPerDay: 20,
@@ -201,6 +212,14 @@ export function defaultConfig() {
         },
         maxConsecutiveSends: 3,
         behavior: {
+          imageInput: {
+            enabled: false,
+            maxImages: 4,
+            maxEdge: 1280,
+            maxBytes: 4194304,
+            timeoutMs: 6000,
+            animationFrames: 2,
+          },
           elsewhere: {
             enabled: true,
             windowMs: 21600000,

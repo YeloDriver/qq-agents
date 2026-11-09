@@ -8,10 +8,11 @@ import { isDeepStrictEqual } from "node:util";
  *   headers: Record<string, string>, args: string[], env: Record<string, string>,
  *   allowedTools: string[]}} ToolServerConfig
  * @typedef {{id: string, type: "dsh" | "codex" | "openai" | "antigravity", label: string, provider: string,
- *   baseUrl?: string, apiKeyEnv?: string, contextWindow?: number, maxToolRounds?: number,
+ *   baseUrl?: string, apiKeyEnv?: string, contextWindow?: number, maxToolRounds?: number, socialProfile?: string|null,
  *   requestTimeoutMs?: number, vision?: boolean, sendEffort?: boolean,
  *   recovery: {autoReconnect: boolean, dshInstance?: string}, command: string,
  *   env?: Record<string, string>, home?: string, preset: string, model: string, effort: string,
+ *   cliProtocol?: "headless" | "acp",
  *   cliReuse?: {enabled: boolean, idleTimeoutMs: number, maxIdleProcesses: number},
  *   toolServers: ToolServerConfig[]}} BackendConfig
  * @typedef {{id: string}} BackendAgent
@@ -20,12 +21,14 @@ import { isDeepStrictEqual } from "node:util";
  * @typedef {{name: string, description?: string, inputSchema?: object}} ToolSpec
  * @typedef {{source: string, contextTokens: number, capacityTokens?: number,
  *   cumulativeTokens?: number, basis: string}} UsageReport
- * @typedef {{conversation?: string, game?: boolean, protectedWork?: boolean, prompt: string, instructions?: string,
+ * @typedef {{eventId: string, index: number, label: string, mediaId?: string, data?: string, mimeType?: string}} InputImage
+ * @typedef {{inputImages?: InputImage[], conversation?: string, game?: boolean, protectedWork?: boolean, social?: boolean, prompt: string, instructions?: string,
  *   onUsage?: (usage: UsageReport) => void, signal: AbortSignal, tools: ToolSpec[],
  *   callTool: (name: string, args: any) => Promise<unknown>, session?: StoredSession | null,
  *   saveSession: (session: StoredSession | null) => void,
  *   onBackendTurn?: (turn: {turnId: string, inputAccepted?: boolean}) => void,
  *   onInputSubmitted?: () => void,
+ *   beforeInputSubmitted?: () => Promise<void>,
  *   onTiming?: (timing: {phase: string, elapsedMs: number, processReused?: boolean}) => void,
  *   onDiagnostic?: (event: unknown, attempt?: number) => void,
  *   recovery?: import("./turn-failure.mjs").RecoveryFailure,
@@ -86,7 +89,11 @@ export function backendSessionConfig(config) {
       return {
         ...shared,
         command: config.command,
-        ...(config.cliReuse?.enabled ? { cliDispatch: "epoch-v1" } : {}),
+        ...(config.cliProtocol === "acp"
+          ? { cliProtocol: "acp-v1" }
+          : config.cliReuse?.enabled
+            ? { cliDispatch: "epoch-v1" }
+            : {}),
       };
   }
 }
@@ -107,6 +114,7 @@ export function backendRequestConfig(config) {
     ...(config.type === "antigravity" ? { cliReuse: config.cliReuse } : {}),
     ...(config.type === "openai"
       ? {
+          socialProfile: config.socialProfile ?? null,
           contextWindow: config.contextWindow,
           maxToolRounds: config.maxToolRounds ?? OPENAI_DEFAULTS.maxToolRounds,
           requestTimeoutMs:

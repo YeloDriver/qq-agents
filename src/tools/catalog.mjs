@@ -3,8 +3,10 @@ import {
   HOME_READ_TOOLS,
   HOME_TOOLS,
 } from "../home/policy.mjs";
+import { SOCIAL_TOOLS } from "../home/social-tool-names.mjs";
 import { z } from "zod";
 import { toolSpecs } from "./specs.mjs";
+import { canUseDraftTool } from "./qq-drafts.mjs";
 import { profileConversation } from "../core/profile.mjs";
 
 export const discoveryInput = z
@@ -71,6 +73,20 @@ export function scopedCatalog(runtime, ctx, input) {
 }
 
 export function toolAvailable(agent, name, conversation) {
+  if (name === "qq_draft")
+    return (
+      /^(private|group):\d+$/.test(conversation) &&
+      agent.tools.some((tool) => canUseDraftTool(agent, tool))
+    );
+  if (SOCIAL_TOOLS.includes(name))
+    return (
+      agent.home?.enabled === true &&
+      agent.home.social?.enabled === true &&
+      ((name === "home_social_process" && conversation === "@subject") ||
+        (name === "home_social_capabilities" && conversation === "@subject") ||
+        (name !== "home_social_process" &&
+          conversation?.startsWith("@social:")))
+    );
   if (HOME_TOOLS.includes(name))
     return (
       agent.home?.enabled === true &&

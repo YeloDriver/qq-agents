@@ -313,7 +313,7 @@ test("unknown/rejected file sends are not retried and count against limits", asy
       fileId: file.fileId,
       requestId: "later",
     }),
-    /REPLY_BURST_LIMIT/,
+    /QQ_DRAFT_DELIVERY_UNRESOLVED/,
   );
 });
 

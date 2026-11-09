@@ -4,6 +4,7 @@ import {
 } from "./updates/managed-client.mjs";
 import { ReleaseUpdates } from "./updates/releases.mjs";
 import { Diagnostics } from "./core/diagnostics.mjs";
+import { MessageTiming } from "./core/message-timing.mjs";
 import { FrameworkKnowledge } from "./core/framework-knowledge.mjs";
 import {
   acquireProcessLock,
@@ -97,8 +98,13 @@ try {
     diagnostics,
     configStore,
     memory,
+    messageTiming:
+      process.env.QQ_AGENTS_MESSAGE_TIMING === "1"
+        ? new MessageTiming()
+        : undefined,
     backendFactory: (c, a) => registry.create(c, a, { root }),
   }));
+  runtime.initializeRuntime();
   runtime.updateMaintenance = args.includes("--upgrade-hold");
   runtime.media = new MediaStore(path.join(root, "media"));
   runtime.framework = new FrameworkKnowledge();

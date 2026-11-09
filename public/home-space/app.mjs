@@ -1,3 +1,4 @@
+import { createSocialView } from "./social.mjs";
 import { decorateSceneObject } from "./scene-decoration.mjs";
 import { catalog } from "../home-preview/catalog.mjs";
 import { createTemplate } from "../home-preview/templates.mjs";
@@ -16,6 +17,7 @@ const labels = {
   guide: "翻开参观小册",
   intro: "查看介绍卡",
   works: "查看作品展示",
+  letters: "查看往来信件",
 };
 const hints = {
   HOME_REVISION_CONFLICT:
@@ -36,6 +38,7 @@ let overview = null,
   draft = null,
   route = null,
   dirty = false,
+  editing = false,
   blocked = false,
   selection = "",
   ticket = 0,
@@ -47,6 +50,7 @@ let overview = null,
   lastFocus = null,
   readerAction = "",
   boardView = null,
+  socialView = null,
   pending = null,
   contentTimer,
   contentTicket = 0;
@@ -90,13 +94,17 @@ function clearView(message = "登录或连接需要重新验证。") {
   blocked = false;
   clearTimeout(contentTimer);
   contentTicket++;
+  socialView?.close();
+  socialView = null;
   boardView?.close();
   boardView = null;
   if ($("reader").open) $("reader").close();
   readerAction = "";
   pageTurn.clear();
   for (const id of ["entries", "menu"]) if ($(id).open) $(id).close();
-  $("editor").open = false;
+  editing = false;
+  $("editor").hidden = true;
+  document.body.classList.remove("editing");
   $("home-tools").hidden = true;
   $("stage").inert = false;
   for (const id of [
@@ -105,6 +113,7 @@ function clearView(message = "登录或连接需要重新验证。") {
     "pagination",
     "reader-content",
     "object-editor",
+    "object-strip",
     "object-select",
   ])
     $(id).replaceChildren();
@@ -113,6 +122,7 @@ function clearView(message = "登录或连接需要重新验证。") {
     "subtitle",
     "folio",
     "layout-status",
+    "selected-object",
     "save-status",
   ])
     $(id).textContent = "";
@@ -146,7 +156,7 @@ async function api(url, body, method) {
   }
   if (startEpoch !== epoch || credential !== token())
     throw Error("HOME_VIEW_EXPIRED");
-  if (response.status === 401 || response.status === 403) {
+  if ([401, 403, 410].includes(response.status)) {
     clearView("登录已失效或当前没有权限，请重新登录。");
     throw Error("UNAUTHORIZED");
   }
@@ -238,7 +248,7 @@ function act(action) {
   } else openReader(action);
 }
 function decorate(node, o) {
-  if ($("editor").open && envelope?.capabilities.write) {
+  if (editing && envelope?.capabilities.write) {
     node.classList.add("editable-piece");
     node.classList.toggle("selected-piece", selection === o.id);
     node.tabIndex = 0;
@@ -281,6 +291,10 @@ function draw(direction = 0) {
       decorate,
     });
   document.body.className = `palette-${draft.palette}`;
+  document.body.classList.toggle(
+    "editing",
+    editing && envelope.capabilities.write,
+  );
   const heading = el("div", "book-heading"),
     chapter = { living: "第 一 页", hall: "第 二 页", room: "第 三 页" }[
       route.type
@@ -351,7 +365,7 @@ function draw(direction = 0) {
               (x, i, a) => a.indexOf(x) === i,
             ),
           ]
-        : ["back", "living", "intro", "works"];
+        : ["back", "living", "intro", "works", "letters"];
   actions.forEach((a) => nav.append(button(actionLabel(a), () => act(a))));
   $("pagination").replaceChildren();
   if (route.type === "hall" && overview.residents.length > 3) {
@@ -366,10 +380,11 @@ function draw(direction = 0) {
       next,
     );
   }
-  $("editor").hidden = !envelope.capabilities.write;
+  $("editor").hidden = !editing || !envelope.capabilities.write;
   $("edit-toggle").hidden = !envelope.capabilities.write;
-  $("edit-toggle").textContent = dirty ? "布置 · 未保存" : "布置";
-  $("edit-toggle").setAttribute("aria-expanded", String($("editor").open));
+  $("edit-toggle").textContent =
+    `${editing ? "收起布置" : "布置"}${dirty ? " · 未保存" : ""}`;
+  $("edit-toggle").setAttribute("aria-expanded", String(editing));
   $("layout-status").textContent = blocked
     ? "布置已有变化，请重读后核对。"
     : dirty
@@ -434,6 +449,8 @@ function editorFields() {
   root.replaceChildren();
   const o = template().objects.find((o) => o.id === selection);
   if (!o) return;
+  $("selected-object").textContent =
+    catalog[draft.objects[o.id]?.asset || o.asset].name;
   const p = draft.objects[o.id] || {};
   const l = el("label", "", "款式"),
     s = el("select");
@@ -462,7 +479,7 @@ function editorFields() {
     input.step = step;
     input.value = p[key] ?? def;
     input.setAttribute("aria-label", title);
-    input.onchange = () => {
+    input.oninput = () => {
       out.value = input.value;
       edit(key, Number(input.value));
     };
@@ -512,7 +529,8 @@ async function refresh(animate = false) {
     $("gate").hidden = true;
     $("home-content").hidden = false;
     $("home-tools").hidden = false;
-    if (animate) $("editor").open = false;
+    if (animate || !next.capabilities.write) editing = false;
+    $("editor-more").open = false;
     const drawing = draw(animate ? turnDirection(oldRoute, nextRoute) : 0);
     editor();
     await drawing;
@@ -736,6 +754,8 @@ function openReader(action) {
   clearTimeout(contentTimer);
   contentTicket++;
   readerAction = action;
+  socialView?.close();
+  socialView = null;
   boardView?.close();
   boardView = null;
   $("reader-content").replaceChildren();
@@ -744,7 +764,25 @@ function openReader(action) {
     guide: "参观小册",
     intro: "介绍卡",
     works: "作品展示",
+    social: "往来管理",
+    letters: `${name(route.agentId)}的信件`,
   }[action];
+  if (action === "social" || action === "letters") {
+    socialView = createSocialView({
+      root: $("reader-content"),
+      api,
+      isActive: () => dialog.open && readerAction === action && !!overview,
+      ...(action === "letters"
+        ? {
+            roomOwnerAgentId: route.agentId,
+            presentation: "letters",
+          }
+        : {}),
+    });
+    if (!dialog.open) dialog.showModal();
+    socialView.render();
+    return;
+  }
   if (action === "board") {
     boardView = window.createBoardView({
       getRoot: () => $("reader-content"),
@@ -783,6 +821,8 @@ function openReader(action) {
 $("reader").addEventListener("close", () => {
   clearTimeout(contentTimer);
   contentTicket++;
+  socialView?.close();
+  socialView = null;
   boardView?.close();
   boardView = null;
   readerAction = "";
@@ -821,13 +861,35 @@ for (const id of ["entries", "menu"]) {
     }
   });
 }
-$("edit-toggle").onclick = () => {
-  $("editor").open = !$("editor").open;
-  if ($("editor").open) $("editor").scrollIntoView({ block: "nearest" });
-};
-$("editor").addEventListener("toggle", () => {
-  $("edit-toggle").setAttribute("aria-expanded", String($("editor").open));
+function setEditing(open) {
+  editing = open && envelope?.capabilities.write === true;
+  $("editor-more").open = false;
   draw();
+  if (editing) {
+    window.scrollTo(0, 0);
+    $("editor-close").focus({ preventScroll: true });
+  } else $("edit-toggle").focus({ preventScroll: true });
+}
+$("edit-toggle").onclick = () => setEditing(!editing);
+$("editor-close").onclick = () => setEditing(false);
+$("editor-more").addEventListener("click", (event) => {
+  if (event.target.closest("button")) {
+    $("editor-more").open = false;
+    $("editor-more").querySelector("summary").focus({ preventScroll: true });
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key !== "Escape" ||
+    !editing ||
+    document.querySelector("dialog[open]")
+  )
+    return;
+  event.preventDefault();
+  if ($("editor-more").open) {
+    $("editor-more").open = false;
+    $("editor-more").querySelector("summary").focus();
+  } else setEditing(false);
 });
 $("palette").onchange = () => {
   draft.palette = $("palette").value;
@@ -837,7 +899,8 @@ $("palette").onchange = () => {
 };
 $("object-select").onchange = () => {
   selection = $("object-select").value;
-  editorFields();
+  editor();
+  draw();
 };
 $("save").onclick = () => save();
 $("undo").onclick = () => save(true);
@@ -928,3 +991,8 @@ refresh().then(() => {
     openReader("board");
   }
 });
+
+$("social-open").onclick = () => {
+  $("menu").close();
+  openReader("social");
+};

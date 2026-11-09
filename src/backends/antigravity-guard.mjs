@@ -5,12 +5,21 @@ import { pathToFileURL } from "node:url";
 
 /** @param {unknown} value @param {string[]} names
  * @param {{path: string, sha256: string, bytes: number}[]} [images]
- * @param {string} [epoch] */
-export function antigravityToolAllowed(value, names, images = [], epoch) {
+ * @param {string} [epoch] @param {boolean} [nativeMcp] */
+export function antigravityToolAllowed(
+  value,
+  names,
+  images = [],
+  epoch,
+  nativeMcp = false,
+) {
   const call = /** @type {any} */ (value);
-  if (call?.name === "view_file") {
-    const file = images.find((image) => image.path === call.args?.AbsolutePath);
-    if (!file || Object.keys(call.args).some((key) => key !== "AbsolutePath"))
+  if (nativeMcp && names.some((name) => call?.name === `mcp_qq-agents_${name}`))
+    return true;
+  if (call?.name === "read_file" || call?.name === "view_file") {
+    const pathKey = call.name === "read_file" ? "Path" : "AbsolutePath";
+    const file = images.find((image) => image.path === call.args?.[pathKey]);
+    if (!file || Object.keys(call.args).some((key) => key !== pathKey))
       return false;
     try {
       const stat = fs.lstatSync(file.path);
@@ -50,7 +59,7 @@ export function antigravityToolAllowed(value, names, images = [], epoch) {
   );
 }
 
-/** A native finish/view_file has no MCP envelope. Bind it to the native step
+/** A native finish/image reader has no MCP envelope. Bind it to the native step
  * watermark; prompt text can quote old epochs and cannot identify authority.
  * @param {any} input @param {any} catalogue */
 export function antigravityHookAllowed(input, catalogue) {
@@ -68,6 +77,7 @@ export function antigravityHookAllowed(input, catalogue) {
     ),
     catalogue.images || [],
     catalogue.turnEpoch,
+    catalogue.nativeMcp === true,
   );
 }
 

@@ -1,8 +1,10 @@
+import { socialSafeExportRow } from "./protection.mjs";
 import { withoutClosenessCache } from "../core/closeness.mjs";
 import fs from "node:fs";
 import { DatabaseSync, backup } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { EXPORT_TABLES, exportDigest } from "./export-format.mjs";
+import { MEMORY_DRAFT_SCHEMA_VERSION } from "./qq-drafts.mjs";
 
 const { source, snapshot, output, agentId, limits } = workerData;
 const cancelled = new Int32Array(workerData.cancelled);
@@ -42,7 +44,10 @@ try {
   db.close();
   db = new DatabaseSync(snapshot, { readOnly: true });
   db.exec("PRAGMA cache_size=-2048; PRAGMA mmap_size=0");
-  if (db.prepare("PRAGMA user_version").get().user_version !== 6)
+  if (
+    db.prepare("PRAGMA user_version").get().user_version !==
+    MEMORY_DRAFT_SCHEMA_VERSION
+  )
     throw Error("UNSUPPORTED_EXPORT_SCHEMA");
   fd = fs.openSync(output, "wx", 0o600);
   let bytes = 0;
@@ -80,12 +85,13 @@ try {
     write((i ? "," : "") + JSON.stringify(name) + ":[");
     digest.update(name + "\n");
     let count = 0;
-    for (const row of db
+    for (const original of db
       .prepare(
         // Restore assigns new rowids in file order; moods find the latest by rowid.
         `SELECT r.* FROM ${from}${name === "events" ? " ORDER BY r.seq" : name === "moods" ? " ORDER BY r.rowid" : ""}`,
       )
       .iterate(agentId)) {
+      const row = socialSafeExportRow(name, original);
       if (name === "person_notes")
         row.value = JSON.stringify(
           withoutClosenessCache(JSON.parse(row.value)),

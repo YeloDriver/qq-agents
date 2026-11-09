@@ -1,5 +1,9 @@
+import { assertHomeSceneMedia } from "../home/scene-media.mjs";
+import { assertNoSocialDisclosure } from "./social-protection.mjs";
 import { peerQzoneSources } from "./peer-qzone-protection.mjs";
-import { waitFirstReply } from "./typing.mjs";
+import { assertInputReviewed } from "./input-review.mjs";
+import { timedDeliveryFailure } from "./message-timing-runtime.mjs";
+import { draftScope, recoverDraftArchives } from "./draft-delivery.mjs";
 import { recallBoundary } from "./recall-boundary.mjs";
 import { containsCredential } from "./secrets.mjs";
 import { beforeShareDelivery } from "../apps/sharing.mjs";
@@ -8,7 +12,7 @@ import { privateGithubSources } from "../github/policy.mjs";
 import { taintMedia } from "../tools/legacy.mjs";
 import { qqMessage } from "../tools/qq-message.mjs";
 import { checkTone } from "./tone-check.mjs";
-import { reserveSendBudget } from "./send-budget.mjs";
+import { checkSendBudget, reserveSendBudget } from "./send-budget.mjs";
 import { replyPeers, peerReplyLastAttemptAt } from "./peer-replies.mjs";
 import {
   resolveMessage,
@@ -58,14 +62,16 @@ export class DeliveryService {
       replyTo,
       atUserId,
       mediaId,
+      inputReview,
     },
-    { archiveBody } = {},
+    { archiveBody, reviewIntent, reviewOptions, onReserve, replyEventId } = {},
   ) {
     const runtime = this.runtime;
     const a = runtime.assertActive(ctx),
       mem = runtime.memory.bind(a.id);
     if (runtime.protectedWork?.context(ctx))
       throw Error("PROTECTED_WORK_OUTBOUND_DENIED");
+    assertNoSocialDisclosure(runtime, ctx);
     runtime.assertDisclosure(ctx);
     if (!text && requestedSegments === undefined && !mediaId)
       throw Error("INVALID_MESSAGE");
@@ -95,7 +101,18 @@ export class DeliveryService {
         connectionId: a.connectionId,
         conversation: ctx.conversation,
       };
-      const own = resolveMessage(mem.db, scope, replyTo);
+      const own = replyEventId
+        ? mem.db
+            .prepare(
+              "SELECT * FROM events WHERE id=? AND agent_id=? AND connection_id=? AND conversation=?",
+            )
+            .get(
+              replyEventId,
+              scope.agentId,
+              scope.connectionId,
+              scope.conversation,
+            )
+        : resolveMessage(mem.db, scope, replyTo);
       if (!own) throw Error("UNKNOWN_REPLY_TARGET");
       replyTo = gatewayMessageId(
         mem.db,
@@ -122,7 +139,10 @@ export class DeliveryService {
       requestId,
       intent: segments,
       body: archiveBody ?? message.body,
-      typingText: message.typingText + (mediaId ? "◻" : ""),
+      inputReview,
+      reviewIntent,
+      reviewOptions,
+      onReserve,
       metadata: {
         replyTo,
         requestedReplyTo,
@@ -151,17 +171,34 @@ export class DeliveryService {
   async deliver(ctx, operation) {
     const runtime = this.runtime;
     const a = runtime.assertActive(ctx);
+    const capture = runtime.messageTiming;
+    const timingId = ctx.messageTimingId;
+    let timingIndex;
+    if (
+      timingId !== undefined &&
+      !ctx.internalDelivery &&
+      ![
+        "recall",
+        "profile",
+        "qzone",
+        "official-collect",
+        "official-remark",
+      ].includes(operation.actionBudget?.kind || operation.intent?.kind)
+    ) {
+      timingIndex = capture.startDelivery(timingId);
+      if (timingIndex !== undefined) operation = { ...operation, timingIndex };
+    }
     ctx.pendingDeliveries = (ctx.pendingDeliveries || 0) + 1;
-    // Drain tracking includes typing, but only ready deliveries occupy the queue.
+    // Drain tracking includes media preparation, before acquiring the connection queue.
     const previous = this.chains.get(a.connectionId);
     const key = a.connectionId + "|" + ctx.conversation;
     const priorConversation = this.conversations.get(key);
-    // Preserve call order within a chat, without holding other chats behind its typing.
+    // Preserve call order within a chat, without holding other chats behind preparation.
     const result = priorConversation
       ? priorConversation
           .catch(() => {})
-          .then(() => this.deliverAfterTyping(ctx, operation))
-      : this.deliverAfterTyping(ctx, operation);
+          .then(() => this.enqueue(ctx, operation))
+      : this.enqueue(ctx, operation);
     this.conversations.set(key, result);
     const drained = Promise.allSettled([previous, result]);
     this.chains.set(a.connectionId, drained);
@@ -170,30 +207,103 @@ export class DeliveryService {
         this.chains.delete(a.connectionId);
     });
     try {
-      return await result;
+      const receipt = await result;
+      if (receipt?.duplicate)
+        capture?.finishDelivery(timingId, timingIndex, "duplicate");
+      return receipt;
+    } catch (error) {
+      capture?.finishDelivery(
+        timingId,
+        timingIndex,
+        timedDeliveryFailure(error),
+      );
+      throw error;
     } finally {
       ctx.pendingDeliveries--;
+      if (!ctx.pendingDeliveries && ctx.messageTimingTerminal)
+        capture?.finishTurn(
+          timingId,
+          ctx.messageTimingTerminal,
+          ctx.messageTimingToolOutcome,
+        );
       if (this.conversations.get(key) === result)
         this.conversations.delete(key);
     }
   }
-  async deliverAfterTyping(ctx, operation) {
-    if (operation.typingText !== undefined) {
-      const { receipt } = this.checkDelivery(ctx, operation, {
-        beforeTyping: true,
-      });
-      if (!receipt) {
-        const wait = waitFirstReply(
-          this.runtime,
+  review(ctx, operation, checked) {
+    if (
+      ctx.internalDelivery ||
+      checked.contactFreeAction ||
+      ["official-collect", "official-remark"].includes(operation.intent?.kind)
+    )
+      return undefined;
+    return assertInputReviewed(
+      this.runtime,
+      ctx,
+      checked.requestId,
+      operation.reviewIntent ?? operation.intent,
+      operation.inputReview,
+      operation.reviewOptions,
+    );
+  }
+  async enqueue(ctx, operation) {
+    const capture =
+      operation.timingIndex === undefined
+        ? undefined
+        : this.runtime.messageTiming;
+    capture?.markDelivery(
+      ctx.messageTimingId,
+      operation.timingIndex,
+      "conversationReady",
+    );
+    const checked = this.checkDelivery(ctx, operation, { beforeQueue: true });
+    if (!checked.receipt) {
+      // Existing authorization and budget denials take precedence over a
+      // review challenge. Preparation can itself be expensive or use QQ.
+      let reviewError;
+      try {
+        this.review(ctx, operation, checked);
+      } catch (error) {
+        reviewError = error;
+      }
+      if (reviewError || operation.prepare) {
+        const { state, now, transport } = this.checkSendPolicy(
           ctx,
-          operation.typingText,
-          operation.typingFallbackMs,
+          operation,
+          checked,
         );
-        if (wait) await wait;
+        checkSendBudget(
+          checked.mem,
+          checked.a.behavior,
+          state.sendTimes,
+          now,
+          !this.reconciled.has(checked.a.id),
+        );
+        if (reviewError) throw reviewError;
+        const started = capture?.clock();
+        try {
+          operation = {
+            ...operation,
+            prepared: await operation.prepare(transport),
+          };
+        } finally {
+          if (started !== undefined)
+            capture.interval(
+              ctx.messageTimingId,
+              "preparation",
+              started,
+              capture.clock(),
+            );
+        }
       }
     }
     const a = this.runtime.assertActive(ctx);
     const previous = this.queues.get(a.connectionId);
+    capture?.markDelivery(
+      ctx.messageTimingId,
+      operation.timingIndex,
+      "queueEntered",
+    );
     const result = previous
       ? previous.catch(() => {}).then(() => this.deliverNow(ctx, operation))
       : this.deliverNow(ctx, operation);
@@ -215,7 +325,7 @@ export class DeliveryService {
       action = false,
       actionBudget,
     },
-    { beforeTyping = false } = {},
+    { beforeQueue = false } = {},
   ) {
     const runtime = this.runtime;
     const a = runtime.assertActive(ctx);
@@ -239,6 +349,7 @@ export class DeliveryService {
     if (proactive) requestId = "intent:" + proactive.id;
     if (typeof requestId !== "string" || !requestId || requestId.length > 200)
       throw Error("INVALID_REQUEST_ID");
+    assertNoSocialDisclosure(runtime, ctx);
     runtime.assertDisclosure(ctx);
     beforeShareDelivery(appService(runtime), ctx, metadata);
     const serialized = JSON.stringify(intent);
@@ -246,8 +357,8 @@ export class DeliveryService {
       throw Error("SENSITIVE_OUTPUT_BLOCKED");
     const previous = mem.delivery(requestId);
     if (previous) {
-      // An in-flight receipt may settle before our queue slot; only skip typing here.
-      if (beforeTyping) return { receipt: previous };
+      // An in-flight receipt may settle before our queue slot; skip preparation here.
+      if (beforeQueue) return { receipt: previous };
       mem.reserveDelivery(requestId, ctx.conversation, intent);
       if (previous.status === "sent")
         return {
@@ -265,24 +376,28 @@ export class DeliveryService {
     // request ID, wording, media, action or target. Same-ID receipt reads above
     // remain available; new deliveries are fenced for this continuation.
     if (ctx.recoveryDeliveryBlocked) throw Error("RECOVERY_DELIVERY_BLOCKED");
-    if (metadata.mediaId)
+    this.assertDraftDelivery(ctx, contactFreeAction);
+    if (metadata.mediaId) {
+      assertHomeSceneMedia(
+        runtime,
+        ctx,
+        runtime.media.metadata(a.id, metadata.mediaId),
+        { sharing: true },
+      );
       runtime.generatedImages.assertDelivery(ctx, metadata.mediaId, requestId);
+    }
     return { a, mem, proactive, requestId, contactFreeAction };
   }
-  async deliverNow(ctx, operation) {
+  assertDraftDelivery(ctx, contactFreeAction) {
+    if (
+      !contactFreeAction &&
+      this.runtime.drafts.unresolved(draftScope(this.runtime, ctx))
+    )
+      throw Error("QQ_DRAFT_DELIVERY_UNRESOLVED");
+  }
+  checkSendPolicy(ctx, operation, { a, mem, proactive }) {
+    const { actionBudget, validate } = operation;
     const runtime = this.runtime;
-    const { a, mem, proactive, requestId, contactFreeAction, receipt } =
-      this.checkDelivery(ctx, operation);
-    if (receipt) return receipt;
-    const {
-      intent,
-      body = "",
-      metadata = {},
-      send,
-      action = false,
-      actionBudget,
-      validate,
-    } = operation;
     validate?.();
     const state = mem.state(ctx.conversation),
       now = runtime.now();
@@ -327,6 +442,38 @@ export class DeliveryService {
     }
     const transport = runtime.transports.get(a.connectionId);
     if (!transport?.connected) throw Error("QQ_NOT_CONNECTED");
+    return { state, now, batchUsed, transport };
+  }
+  async deliverNow(ctx, operation) {
+    const runtime = this.runtime;
+    const capture =
+      operation.timingIndex === undefined ? undefined : runtime.messageTiming;
+    const mark =
+      capture &&
+      ((phase) =>
+        capture.markDelivery(
+          ctx.messageTimingId,
+          operation.timingIndex,
+          phase,
+        ));
+    mark?.("queueLeft");
+    const checked = this.checkDelivery(ctx, operation);
+    const { a, mem, proactive, requestId, contactFreeAction, receipt } =
+      checked;
+    if (receipt) return receipt;
+    const {
+      intent,
+      body = "",
+      metadata = {},
+      send,
+      action = false,
+      actionBudget,
+    } = operation;
+    const { state, now, batchUsed, transport } = this.checkSendPolicy(
+      ctx,
+      operation,
+      checked,
+    );
     const actionKind = action ? actionBudget?.kind || intent?.kind : null;
     const event = {
       connectionId: a.connectionId,
@@ -344,7 +491,11 @@ export class DeliveryService {
         protectedRepositories: privateGithubSources(ctx, runtime),
       },
     };
+    let inputReview;
     mem.store.transaction(() => {
+      // Intake writes and reservation share this database. Keep the last input
+      // check inside its write transaction, with no await before gateway submission.
+      this.assertDraftDelivery(ctx, contactFreeAction);
       const sendTimes = reserveSendBudget(
         mem,
         a.behavior,
@@ -352,6 +503,7 @@ export class DeliveryService {
         now,
         !this.reconciled.has(a.id),
       );
+      inputReview = this.review(ctx, operation, checked);
       mem.reserveDelivery(requestId, ctx.conversation, intent);
       mem.setState(ctx.conversation, {
         ...state,
@@ -379,6 +531,7 @@ export class DeliveryService {
               }
           : {}),
       });
+      operation.onReserve?.(requestId, inputReview);
       if (!contactFreeAction) runtime.subject.reserveContact(ctx, proactive);
       mem.append({
         ...event,
@@ -387,6 +540,7 @@ export class DeliveryService {
         status: "pending",
       });
     });
+    mark?.("reserved");
     if (!actionBudget)
       ctx.replyBatchSends = (ctx.replyBatchSends ?? ctx.sendCount) + 1;
     ctx.deliveryAttempted = true;
@@ -409,39 +563,111 @@ export class DeliveryService {
       });
       throw e;
     }
+    let acknowledged = false;
     try {
-      const receipt = await send(transport);
+      mark?.("submitted");
+      const receipt = await send(transport, operation.prepared);
       if (action ? receipt?.confirmed !== true : receipt?.messageId == null)
         throw Error("DELIVERY_UNCONFIRMED");
+      mark?.("gatewayConfirmed");
+      acknowledged = true;
       // Record confirmed delivery even if the user pauses while its network request is in flight.
       const messageId =
         receipt.messageId == null ? null : String(receipt.messageId);
-      mem.store.transaction(() => {
+      const confirmation = {
+        action,
+        messageNamespace:
+          runtime.connection(a.connectionId).messageIdNamespace || "onebot",
+        ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
+      };
+      let draftLinked;
+      const persistConfirmation = () => {
         mem.completeDelivery(requestId, "sent", messageId);
-        if (!contactFreeAction) runtime.subject.delivered(ctx, "sent");
-      });
+        draftLinked = runtime.drafts.recordConfirmation(
+          a.id,
+          requestId,
+          confirmation,
+        );
+      };
+      try {
+        mem.store.transaction(() => {
+          persistConfirmation();
+          if (inputReview) {
+            const current = mem.state(ctx.conversation);
+            if (inputReview.throughSeq > (current.inputReviewThroughSeq || 0))
+              mem.setState(ctx.conversation, {
+                ...current,
+                inputReviewThroughSeq: inputReview.throughSeq,
+              });
+          }
+          if (!contactFreeAction) runtime.subject.delivered(ctx, "sent");
+        });
+      } catch (error) {
+        // Optional review or intent bookkeeping must not erase a received ACK.
+        mem.store.transaction(persistConfirmation);
+        runtime.diagnostics.report(
+          Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: error }),
+          {
+            component: "runtime",
+            agentId: a.id,
+            conversation: ctx.conversation,
+          },
+        );
+      }
+      mark?.("ledgerConfirmed");
+      capture?.finishDelivery(
+        ctx.messageTimingId,
+        operation.timingIndex,
+        "confirmed",
+      );
+      for (const { id, version } of inputReview?.accepted || [])
+        (ctx.confirmedReviewInput ??= new Map()).set(id, version);
       if (!actionBudget) {
         ctx.confirmedSends = (ctx.confirmedSends || 0) + 1;
         runtime.conversations.sent(ctx);
       }
-      const record = mem.append({
-        ...event,
-        dedupe: "send:" + requestId + ":sent",
-        messageId,
-        payload: {
-          ...event.payload,
-          messageNamespace:
-            runtime.connection(a.connectionId).messageIdNamespace || "onebot",
-          ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
-        },
-        kind: action ? "action.confirmed" : "message.sent",
-        status: "confirmed",
-      });
+      let record;
+      if (draftLinked) {
+        try {
+          record = recoverDraftArchives(
+            runtime.memory,
+            runtime.drafts,
+            a.id,
+            requestId,
+          );
+        } catch (error) {
+          runtime.diagnostics.report(
+            Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: error }),
+            {
+              component: "runtime",
+              agentId: a.id,
+              conversation: ctx.conversation,
+            },
+          );
+        }
+      } else
+        record = mem.append({
+          ...event,
+          dedupe: "send:" + requestId + ":sent",
+          messageId,
+          payload: {
+            ...event.payload,
+            messageNamespace:
+              runtime.connection(a.connectionId).messageIdNamespace || "onebot",
+            ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
+          },
+          kind: action ? "action.confirmed" : "message.sent",
+          status: "confirmed",
+        });
       return {
         status: "sent",
         messageId,
         // The archived record, which mind tools accept as evidence.
-        ...(record?.id ? { recordId: record.id } : {}),
+        ...(record?.id
+          ? { recordId: record.id }
+          : draftLinked
+            ? { archivePending: true }
+            : {}),
         ...(action ? { actionConfirmed: true } : {}),
         ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
       };
@@ -458,12 +684,17 @@ export class DeliveryService {
         ? e.reason
         : undefined;
       // A later audit failure must never downgrade an already-confirmed receipt.
-      if (mem.delivery(requestId)?.status === "sent")
+      if (acknowledged)
         throw Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: e });
       mem.store.transaction(() => {
         mem.completeDelivery(requestId, status);
         if (!contactFreeAction) runtime.subject.delivered(ctx, status);
       });
+      capture?.finishDelivery(
+        ctx.messageTimingId,
+        operation.timingIndex,
+        status,
+      );
       mem.append({
         ...event,
         dedupe: "send:" + requestId + ":" + status,

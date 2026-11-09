@@ -1,5 +1,7 @@
 // @ts-check
+import { closeSocialSessions } from "./social-sessions.mjs";
 import fs from "node:fs";
+import { runNativeSocial } from "./native-social.mjs";
 import {
   codexTurnFailure,
   BackendTurnFailure,
@@ -284,9 +286,25 @@ export class CodexBackend {
   acceptsSession(session, tools, previous) {
     return acceptsSession(this, session, tools, previous);
   }
+  /** @param {{windowId?: string, actorGeneration?: string}} [filter] */
+  async closeSocialSessions(filter = {}) {
+    await closeSocialSessions(this, filter);
+  }
+  /** @param {any} params */
+  async runSocial(params) {
+    return runNativeSocial(this, params, async (session) => {
+      if (!session) return;
+      try {
+        await this.rpc.request("thread/archive", { threadId: session.id });
+      } catch {
+        throw Error("SOCIAL_CONTEXT_FINALIZATION_FAILED");
+      }
+    });
+  }
   /** @param {RunParams} params */
   async run({
     prompt,
+    inputImages = [],
     instructions,
     onUsage,
     signal,
@@ -296,15 +314,17 @@ export class CodexBackend {
     saveSession,
     onBackendTurn,
     onInputSubmitted,
+    beforeInputSubmitted,
     onImageSession,
     onGeneratedImage,
     onImageError,
     recovery,
     protectedWork = false,
     game = false,
+    social = false,
   }) {
     const policy =
-      protectedWork || game
+      protectedWork || game || social
         ? {
             ...restrictions,
             "features.image_generation": false,
@@ -312,12 +332,35 @@ export class CodexBackend {
             "features.computer_use": false,
             "features.in_app_browser": false,
             "features.apps": false,
+            ...(social ? { mcp_servers: {} } : {}),
           }
         : restrictions;
     const signature = this.sessionSignature(tools);
     assertSession(session, "codex", signature);
     await beforeSessionInput(session, () => this.ready());
     if (signal.aborted) throw Error("ABORTED");
+    if (social) {
+      // Empty MCP tables merge with inherited config; disable each effective
+      // server explicitly instead of assuming mcp_servers={} removes it.
+      try {
+        const effective = await this.rpc.request("config/read", {
+          includeLayers: false,
+          cwd: this.root,
+        });
+        if (!effective.config || typeof effective.config !== "object")
+          throw Error("SOCIAL_BACKEND_UNSUPPORTED");
+        const servers = effective.config.mcp_servers || {};
+        if (typeof servers !== "object" || Array.isArray(servers))
+          throw Error("SOCIAL_BACKEND_UNSUPPORTED");
+        Object.assign(policy, {
+          mcp_servers: Object.fromEntries(
+            Object.keys(servers).map((name) => [name, { enabled: false }]),
+          ),
+        });
+      } catch {
+        throw Error("SOCIAL_BACKEND_UNSUPPORTED");
+      }
+    }
     let threadId = session?.id;
     if (threadId)
       await beforeSessionInput(session, async () => {
@@ -396,10 +439,25 @@ export class CodexBackend {
     signal.addEventListener("abort", abort, { once: true });
     try {
       if (signal.aborted) throw Error("ABORTED");
+      await beforeInputSubmitted?.();
+      if (signal.aborted) throw Error("ABORTED");
       onInputSubmitted?.();
       const receipt = await this.rpc.request("turn/start", {
         threadId,
-        input: [{ type: "text", text: prompt, text_elements: [] }],
+        input: [
+          { type: "text", text: prompt, text_elements: [] },
+          ...inputImages.flatMap((image) => [
+            { type: "text", text: image.label, text_elements: [] },
+            ...(image.data
+              ? [
+                  {
+                    type: "image",
+                    url: `data:${image.mimeType};base64,${image.data}`,
+                  },
+                ]
+              : []),
+          ]),
+        ],
         ...(this.config.model ? { model: this.config.model } : {}),
         effort: this.config.effort || "high",
       });
@@ -534,6 +592,7 @@ export class CodexBackend {
   async close() {
     this.closing = true;
     await this.cancel();
+    await this.closeSocialSessions();
     this.rpc.close();
     await this.external.close();
   }

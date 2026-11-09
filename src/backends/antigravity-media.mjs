@@ -11,12 +11,13 @@ import {
   inspectGif,
 } from "../tools/animation.mjs";
 
-/** Native view_file must only see pixels returned by an authorized tool in this turn.
- * CLI MCP offloading alone does not reliably attach later images to model input. */
+/** Native image readers must only see pixels returned by an authorized tool in this turn.
+ * Headless MCP offloading needs native reads; ACP retains validated image blocks. */
 export class AntigravityMedia {
-  /** @param {string} [root] */
-  constructor(root) {
+  /** @param {string} [root] @param {boolean} [direct] */
+  constructor(root, direct = false) {
     this.root = root;
+    this.direct = direct;
     /** @type {string | null} */
     this.directory = null;
     /** @type {Map<string, {path: string, sha256: string, bytes: number}>} */
@@ -133,6 +134,19 @@ export class AntigravityMedia {
         64 * 1024 * 1024
     )
       throw Error("ANTIGRAVITY_MEDIA_LIMIT");
+    if (this.direct) {
+      if (typeof result[mediaLease] === "function" && !result[mediaLease]())
+        throw Error("ANTIGRAVITY_TURN_INACTIVE");
+      for (const p of added) {
+        this.files.set(p.sha256, {
+          path: "",
+          sha256: p.sha256,
+          bytes: p.data.length,
+        });
+        this.bytes += p.data.length;
+      }
+      return result;
+    }
     const directory = this.prepare();
     const created = [];
     try {
@@ -164,12 +178,13 @@ export class AntigravityMedia {
         const file = this.files.get(prepared[index++].sha256);
         return {
           type: "text",
-          text: `Image ${index}: pixels are not yet visible. Call native view_file with AbsolutePath=${JSON.stringify(file?.path)} to inspect this exact image before describing it. This path is authorized only for this turn. Preserve the original frame timing and sampled/complete metadata; do not infer unseen frames.`,
+          text: `Image ${index}: pixels are not yet visible. Call native read_file with Path=${JSON.stringify(file?.path)} to inspect this exact image before describing it; legacy view_file with AbsolutePath=${JSON.stringify(file?.path)} is also supported. This path is authorized only for this turn. Preserve the original frame timing and sampled/complete metadata; do not infer unseen frames.`,
         };
       }),
     };
   }
   catalog() {
+    if (this.direct) return [];
     for (const [sha, leases] of this.leases) {
       if (!this.unrestricted.has(sha) && !leases.some((lease) => lease())) {
         const file = this.files.get(sha);

@@ -464,9 +464,6 @@ main {
   pointer-events: none;
   opacity: 0;
 }
-#editor:not([open]) {
-  display: none;
-}
 #editor {
   margin: 8px 0 24px;
   border-radius: 3px;
@@ -652,4 +649,12 @@ main {
     animation: none;
     transition: none;
   }
+}
+
+.paper-object[data-instance="envelope"] {
+  min-width: 44px;
+  min-height: 44px;
+}
+#reader[data-kind="letters"] {
+  width: min(760px, calc(100% - 32px));
 }

@@ -237,7 +237,9 @@ node src/main.mjs --data /path/to/private-data --port 3210
 
 - [功能说明：主动调度、语音、图片与旧工具](docs/FEATURES.md)
 - [聊天接续：历史原文、未完成笔记与已读边界](docs/CHAT-CONTEXT.md)
+- [发送前审阅：新输入、续读与明确重提](docs/CHAT-CONTEXT.md#发送前审阅)
 - [连续聊天与联网策略](docs/CHAT-NETWORK-POLICY.md)
+- [消息链路时序观测与合成基准](docs/MESSAGE-TIMING.md)
 - [自主文件收发](docs/FILE-TRANSFER.md)
 - [图片、截图与文件资料库](docs/SAVED-MEDIA.md)
 - [平台浏览与分享](docs/APP-EXPLORATION-IMPLEMENTATION.md)
@@ -252,10 +254,15 @@ node src/main.mjs --data /path/to/private-data --port 3210
 **设计与参考**
 
 - [纸页小窝：真实居民、公共布局保存与留言板](docs/AI-HOME.md)
+- [小窝社交恢复与回退](docs/AI-HOME-SOCIAL-RECOVERY.md)
+- [小窝二阶段社交验收记录](docs/AI-HOME-SOCIAL-ACCEPTANCE.md)
+- [小窝社交后端预算与临时上下文前置契约](docs/SOCIAL-BACKENDS.md)
+- [独立主体社交回合、双向同意与有界交流时段](docs/HOME-SOCIAL-RUNTIME.md)
 - [纸页小窝场景预览：纸板、纸片与手机布局](docs/AI-HOME-PREVIEW.md)
 - [纸页小窝素材来源与压缩说明](docs/AI-HOME-ASSETS.md)
 - [AI 小窝一期完成计划与验收跟踪](docs/plans/2026-11-05-ai-home-phase-one-delivery.md)
 - [AI 小窝一期验收与恢复、回滚说明](docs/AI-HOME-ACCEPTANCE.md)
+- [AI 小窝二阶段实施契约与 PR 计划](docs/plans/2026-11-05-ai-home-phase-two.md)
 - [AI 小窝三阶段整体设计（v0.4.2 原始讨论稿）](docs/plans/2026-11-04-ai-home-roadmap.md)
 - [AI 小窝第一阶段详细设计（v0.4.2 原始讨论稿）](docs/plans/2026-11-04-ai-home-phase-one.md)
 

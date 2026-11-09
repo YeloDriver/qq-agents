@@ -44,7 +44,7 @@ async function go(page, hash) {
   await ready(page, `#${hash}`);
 }
 async function editor(page) {
-  if (!(await page.locator("#editor").evaluate((n) => n.open)))
+  if (!(await page.locator("#editor").isVisible()))
     await page.click("#edit-toggle");
 }
 async function request(url, body) {
@@ -103,6 +103,77 @@ try {
   );
   await go(page, "living");
   await editor(page);
+  // Inspect the scene before pointer release: change-only handlers miss live drags.
+  await page.selectOption("#object-select", "plant");
+  for (const [label, property] of [
+    ["横向偏移", "left"],
+    ["纵向偏移", "bottom"],
+    ["大小", "width"],
+    ["前后层级", "zIndex"],
+  ]) {
+    const slider = page.getByRole("slider", { name: label, exact: true });
+    const piece = page.locator('[data-instance="plant"]');
+    const before = await piece.evaluate((n, p) => n.style[p], property);
+    await slider.scrollIntoViewIfNeeded();
+    const box = await slider.boundingBox();
+    const values = await slider.evaluate((n) => ({
+      min: Number(n.min),
+      max: Number(n.max),
+      value: Number(n.value),
+    }));
+    const track = box.width - 16;
+    const x =
+      box.x +
+      8 +
+      (track * (values.value - values.min)) / (values.max - values.min);
+    await page.mouse.move(x, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 8 + track * 0.8, box.y + box.height / 2, {
+      steps: 5,
+    });
+    check(
+      `${label} previews while dragging before release`,
+      (await piece.evaluate((n, p) => n.style[p], property)) !== before,
+    );
+    check(
+      `${label} updates its displayed value`,
+      await slider.evaluate(
+        (n) => n.parentElement.querySelector("output").value === n.value,
+      ),
+    );
+    await page.mouse.up();
+  }
+  check(
+    "slider previews do not persist until save",
+    !f.runtime.home.read("living").layout.objects.plant,
+  );
+  await page.click("#save");
+  await page.waitForFunction(() =>
+    document.getElementById("toast").textContent.includes("布置已保存"),
+  );
+  const savedPlant = f.runtime.home.read("living").layout.objects.plant;
+  check(
+    "all four slider values persist",
+    ["dx", "dy", "scale", "z"].every(
+      (key) => typeof savedPlant[key] === "number",
+    ),
+  );
+  await page.reload();
+  await ready(page, "#living");
+  await editor(page);
+  await page.selectOption("#object-select", "plant");
+  check(
+    "slider value survives reload",
+    Number(
+      await page.getByRole("slider", { name: "横向偏移" }).inputValue(),
+    ) === savedPlant.dx,
+  );
+  await page.locator("#editor-more summary").click();
+  await page.click("#undo");
+  await page.waitForFunction(() =>
+    document.getElementById("toast").textContent.includes("撤销后的新版本"),
+  );
+  await editor(page);
   await page.selectOption("#palette", "blue");
   await page.click("#save");
   await page.waitForFunction(() =>
@@ -117,14 +188,17 @@ try {
       .evaluate((n) => n.classList.contains("palette-blue")),
   );
   await editor(page);
+  await page.locator("#editor-more summary").click();
   await page.click("#reset");
   check(
     "reset is only an unsaved draft",
     f.runtime.home.read("living").layout.palette === "blue",
   );
+  await page.locator("#editor-more summary").click();
   await page.click("#discard");
   await ready(page, "#living");
   await editor(page);
+  await page.locator("#editor-more summary").click();
   await page.click("#undo");
   await page.waitForFunction(() =>
     document.getElementById("toast").textContent.includes("撤销后的新版本"),
@@ -151,6 +225,7 @@ try {
     f.runtime.home.read("living").layout.palette === "blue" &&
       (await page.locator("#save").isDisabled()),
   );
+  await page.locator("#editor-more summary").click();
   await page.click("#discard");
   await ready(page, "#living");
   await page.clock.install();
@@ -204,6 +279,7 @@ try {
     "late-poll draft retains its original expected revision",
     f.runtime.home.read("living").layout.palette === "cream",
   );
+  await page.locator("#editor-more summary").click();
   await page.click("#discard");
   await ready(page, "#living");
   const post = await request("/api/board/post", {
@@ -248,7 +324,8 @@ try {
     fullPage: true,
   });
   await page.click("#close-reader");
-  await page.locator("#editor").evaluate((n) => (n.open = false));
+  if (await page.locator("#editor").isVisible())
+    await page.click("#editor-close");
   await page.screenshot({
     path: path.join(output, "living-desktop.png"),
     fullPage: true,

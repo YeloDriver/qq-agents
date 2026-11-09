@@ -1,4 +1,6 @@
 // @ts-check
+import { closeSocialSessions } from "./social-sessions.mjs";
+import { runNativeSocial } from "./native-social.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
@@ -279,7 +281,10 @@ export class AntigravityBackend {
   ) {
     this.config = { ...config, type: /** @type {const} */ ("antigravity") };
     this.agent = agent;
-    this.sessionProtocol = "antigravity-tools-v3";
+    this.sessionProtocol =
+      config.cliProtocol === "acp"
+        ? "antigravity-acp-v1"
+        : "antigravity-tools-v3";
     this.spawn = spawn;
     this.stop = stop;
     this.root = privateDirectory(
@@ -315,13 +320,31 @@ export class AntigravityBackend {
     // would make an agent inherit tools or executable hooks outside its contract.
     for (const name of fs.readdirSync(configuration))
       if (
-        !["mcp_config.json", "projects", ".migrated"].includes(name) ||
+        !["mcp_config.json", "projects", ".migrated", "config.json"].includes(
+          name,
+        ) ||
         fs.lstatSync(path.join(configuration, name)).isSymbolicLink()
       )
         throw Error("ANTIGRAVITY_PROFILE_UNSAFE");
     for (const name of ["GEMINI.md", "AGENTS.md", "skills", "hooks.json"])
       if (fs.existsSync(path.join(this.profile, name)))
         throw Error("ANTIGRAVITY_PROFILE_UNSAFE");
+    // New CLI versions persist a default swarm plugin on first use. Pin it off
+    // before startup; only this exact inert configuration is permitted on reuse.
+    const pluginConfig = path.join(configuration, "config.json");
+    const disabledPlugins = { plugins: { swarm: { enabled: false } } };
+    if (fs.existsSync(pluginConfig)) {
+      try {
+        if (
+          JSON.stringify(JSON.parse(fs.readFileSync(pluginConfig, "utf8"))) !==
+          JSON.stringify(disabledPlugins)
+        )
+          throw Error();
+      } catch {
+        throw Error("ANTIGRAVITY_PROFILE_UNSAFE");
+      }
+    }
+    managedFile(pluginConfig, JSON.stringify(disabledPlugins) + "\n");
     const mcp = path.join(configuration, "mcp_config.json");
     if (fs.existsSync(mcp)) {
       if (fs.lstatSync(mcp).isSymbolicLink())
@@ -548,7 +571,7 @@ export class AntigravityBackend {
     )
       managedFile(
         agentFile,
-        `---\nname: qq-agents\ndescription: QQ Agents restricted role\nmainAgent: true\nsubagent: false\ntools:\n  - finish\n  - view_file\nenable_mcp_tools: true\ncommandExecutionPolicy: off\n---\n${params.instructions || ""}\n\n${routing}Use the qq-agents MCP tools for actions. ${reuse ? "" : 'Call call_mcp_tool with ServerName="qq-agents", ToolName equal to an allowed name, and Arguments matching that tool\'s JSON schema below. '}Do not guess parameter names or read framework source to discover arguments. The current chat and authorization are bound by the bridge; never add target, chatId or context fields unless the schema requires them. Ordinary assistant text is never delivered to QQ. Only native view_file on the exact image paths returned by an authorized tool in the CURRENT turn is allowed. Always call view_file before describing those pixels; MCP path text is not visual evidence. Never read other files or reuse a previous turn image path; request the original bridge tool again. No native task, filesystem writes, shell, browser, scheduling or subagent actions are authorized.\n\nAllowed tool argument schemas keyed by ToolName (required fields and additionalProperties are binding):\n${JSON.stringify(Object.fromEntries(params.tools.map(({ name, inputSchema }) => [name, antigravitySchemaContract(inputSchema)])))}\n`,
+        `---\nname: qq-agents\ndescription: QQ Agents restricted role\nmainAgent: true\nsubagent: false\ntools:\n  - finish\n  - view_file\nenable_mcp_tools: true\ncommandExecutionPolicy: off\n---\n${params.instructions || ""}\n\n${routing}Use the qq-agents MCP tools for actions. ${reuse ? "" : 'Call call_mcp_tool with ServerName="qq-agents", ToolName equal to an allowed name, and Arguments matching that tool\'s JSON schema below. '}Do not guess parameter names or read framework source to discover arguments. The current chat and authorization are bound by the bridge; never add target, chatId or context fields unless the schema requires them. Ordinary assistant text is never delivered to QQ. Only native read_file (Path) or legacy view_file (AbsolutePath) on the exact image paths returned by an authorized tool in the CURRENT turn is allowed. Always call the native image reader before describing those pixels; MCP path text is not visual evidence. Never read other files or reuse a previous turn image path; request the original bridge tool again. No native task, filesystem writes, shell, browser, scheduling or subagent actions are authorized.\n\nAllowed tool argument schemas keyed by ToolName (required fields and additionalProperties are binding):\n${JSON.stringify(Object.fromEntries(params.tools.map(({ name, inputSchema }) => [name, antigravitySchemaContract(inputSchema)])))}\n`,
       );
     else {
       // Preserve the role instructions while refreshing compatible optional fields.
@@ -561,7 +584,25 @@ export class AntigravityBackend {
       if (offset < 0) throw Error("ANTIGRAVITY_WORKSPACE_UNSAFE");
       managedFile(
         agentFile,
-        previous.slice(0, offset) +
+        // Native aliases resolve to one tool; register it once and preserve the transcript.
+        previous
+          .slice(0, offset)
+          .replace(
+            "\ntools:\n  - finish\n  - read_file\n  - view_file\n",
+            "\ntools:\n  - finish\n  - view_file\n",
+          )
+          .replace(
+            "\ntools:\n  - finish\nenable_mcp_tools:",
+            "\ntools:\n  - finish\n  - view_file\nenable_mcp_tools:",
+          )
+          .replace(
+            "Only native view_file on the exact image paths",
+            "Only native read_file (Path) or legacy view_file (AbsolutePath) on the exact image paths",
+          )
+          .replace(
+            "Always call view_file before describing those pixels",
+            "Always call the native image reader before describing those pixels",
+          ) +
           marker +
           JSON.stringify(
             Object.fromEntries(
@@ -572,6 +613,21 @@ export class AntigravityBackend {
             ),
           ) +
           "\n",
+      );
+    }
+    if (this.config.cliProtocol === "acp") {
+      // Replace only bridge-owned guidance, preserving arbitrary role instructions.
+      const headless =
+        "Only native read_file (Path) or legacy view_file (AbsolutePath) on the exact image paths returned by an authorized tool in the CURRENT turn is allowed. Always call the native image reader before describing those pixels; MCP path text is not visual evidence. Never read other files or reuse a previous turn image path; request the original bridge tool again. ";
+      managedFile(
+        agentFile,
+        fs
+          .readFileSync(agentFile, "utf8")
+          .replace("  - view_file\n", "")
+          .replace(
+            headless,
+            "Authorized MCP image content blocks contain visible pixels. Inspect those pixels directly; never read files to view an image. ",
+          ),
       );
     }
     const settings = path.join(workspace, "settings.json");
@@ -589,7 +645,11 @@ export class AntigravityBackend {
           ],
           allow: [
             ...[...names].map((name) => `mcp(qq-agents/${name})`),
-            `read_file(${(mediaRoot || media.prepare()).replaceAll("\\", "/")}/*)`,
+            ...(this.config.cliProtocol === "acp"
+              ? []
+              : [
+                  `read_file(${(mediaRoot || media.prepare()).replaceAll("\\", "/")}/*)`,
+                ]),
           ],
         },
       }),
@@ -607,6 +667,29 @@ export class AntigravityBackend {
         .filter(Boolean)
         .join(path.delimiter);
     }
+    if (this.config.cliProtocol === "acp")
+      return this.spawn(
+        process.execPath,
+        [
+          path.join(here, "antigravity-acp.mjs"),
+          JSON.stringify({
+            command: this.config.command || "agy",
+            profile: this.profile,
+            settings,
+            workspace,
+            model: this.config.model,
+            effort: this.config.effort,
+            session: params.session?.id,
+          }),
+        ],
+        {
+          cwd: workspace,
+          env: { ...childEnv, QQ_AGY_ENDPOINT: endpoint, QQ_AGY_TOKEN: token },
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: process.platform !== "win32",
+          windowsHide: true,
+        },
+      );
     return this.spawn(
       this.config.command || "agy",
       [
@@ -771,9 +854,43 @@ export class AntigravityBackend {
       finishDone();
     }
   }
+  /** @param {{windowId?: string, actorGeneration?: string}} [filter] */
+  async closeSocialSessions(filter = {}) {
+    await closeSocialSessions(this, filter);
+  }
+  /** @param {any} params */
+  async runSocial(params) {
+    return runNativeSocial(this, params, async (session, conversation) => {
+      const key = createHash("sha256").update(conversation).digest("hex");
+      try {
+        fs.rmSync(path.join(this.root, "workspaces", key), {
+          recursive: true,
+          force: true,
+        });
+        if (session)
+          for (const suffix of ["", "-wal", "-shm"])
+            fs.rmSync(
+              path.join(
+                this.profile,
+                "cli",
+                "conversations",
+                session.id + ".db" + suffix,
+              ),
+              { force: true },
+            );
+      } catch {
+        throw Error("SOCIAL_CONTEXT_FINALIZATION_FAILED");
+      }
+    });
+  }
   /** @param {RunParams} params */
   async run(params) {
-    if (this.config.cliReuse?.enabled) return this.runReusable(params);
+    if (
+      this.config.cliProtocol !== "acp" &&
+      !params.social &&
+      this.config.cliReuse?.enabled
+    )
+      return this.runReusable(params);
     const timingStart = performance.now();
     const timing = (/** @type {string} */ phase) =>
       params.onTiming?.({
@@ -798,7 +915,10 @@ export class AntigravityBackend {
     const pending = new Set();
     const diagnosticEvent = (/** @type {Record<string, unknown>} */ value) =>
       diagnosticActive && antigravityDiagnostic(params, timingStart, value);
-    const media = new AntigravityMedia();
+    const media = new AntigravityMedia(
+      undefined,
+      this.config.cliProtocol === "acp",
+    );
     const names = new Set(params.tools.map((tool) => tool.name));
     const server = http.createServer(async (req, res) => {
       const reply = (
@@ -821,7 +941,11 @@ export class AntigravityBackend {
         return reply(200, {});
       }
       if (req.method === "GET" && req.url === "/catalog")
-        return reply(200, { tools: params.tools, images: media.catalog() });
+        return reply(200, {
+          tools: params.tools,
+          nativeMcp: this.config.cliProtocol === "acp",
+          images: media.catalog(),
+        });
       if (req.method !== "POST" || req.url !== "/call") return reply(404, {});
       let spec;
       try {
@@ -1076,12 +1200,21 @@ export class AntigravityBackend {
       });
       // Prompts and credentials never appear in process arguments. EOF ends this
       // turn's process after its result; subsequent turns explicitly resume by ID.
+      await params.beforeInputSubmitted?.();
+      if (params.signal.aborted) throw Error("ABORTED");
       params.onInputSubmitted?.();
       timing("inputSubmitted");
       inputSubmitted = true;
       child.stdin?.end(
-        JSON.stringify({ event: "user", message: { content: params.prompt } }) +
-          "\n",
+        JSON.stringify({
+          event: "user",
+          message: {
+            content: params.prompt,
+            ...(this.config.cliProtocol === "acp"
+              ? { inputImages: params.inputImages }
+              : {}),
+          },
+        }) + "\n",
       );
       const code = await completed;
       if (cancelled || params.signal.aborted) throw Error("ABORTED");
@@ -1187,6 +1320,7 @@ export class AntigravityBackend {
   async close() {
     this.closing = true;
     await this.cancel();
+    await this.closeSocialSessions();
     await this.external.close();
   }
 }

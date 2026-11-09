@@ -7,7 +7,14 @@ import {
   renderHomeScene,
 } from "../src/home/scene-view.mjs";
 import { homeTemplate, defaultLayout } from "../src/home/layout.mjs";
+import path from "node:path";
+import { MediaStore } from "../src/tools/media.mjs";
 import { findScreenshotBrowser } from "../src/tools/public-screenshot.mjs";
+
+const png = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+  "base64",
+);
 
 function setup(t) {
   const cfg = config();
@@ -18,20 +25,29 @@ function setup(t) {
     sceneView: { enabled: true },
   };
   const f = fixture(t, { cfg });
+  f.runtime.media = new MediaStore(path.join(f.root, "media"));
   return { ...f, ctx: context(f.runtime, "agent-0", "@subject") };
 }
-test("scene view is opt-in, own-target only and text fallback is explicit", async (t) => {
+test("scene view is opt-in, own-target only and image sharing does not require model vision", async (t) => {
   const f = setup(t);
   const a = f.runtime.agent("agent-0");
   const backend = f.runtime.config.backends.find((b) => b.id === a.backendId);
   backend.type = "openai";
   backend.vision = false;
-  const result = await homeSceneView(f.runtime, f.ctx, {
-    type: "room",
-    viewport: "mobile",
-  });
-  assert.equal(result.imageAvailable, false);
-  assert.equal(result.reason, "VISION_UNSUPPORTED");
+  const result = await homeSceneView(
+    f.runtime,
+    f.ctx,
+    {
+      type: "room",
+      viewport: "mobile",
+    },
+    async () => png,
+  );
+  assert.equal(result.imageAvailable, true);
+  assert.equal(result.modelImageAttached, false);
+  assert.ok(result.mediaId);
+  assert.equal(result.content, undefined);
+  assert.equal(result.effectiveScene.visibleObjectCount, 13);
   assert.equal(result.view.ownerAgentId, a.id);
   assert.equal(result.view.layoutRevision, 0);
   a.home.sceneView.enabled = false;
@@ -40,6 +56,24 @@ test("scene view is opt-in, own-target only and text fallback is explicit", asyn
     /HOME_SCENE_VIEW_DISABLED/,
   );
 });
+test("formal tool dispatch keeps failed scene descriptions out of MCP content arrays", async (t) => {
+  const f = setup(t);
+  const previous = process.env.QQ_SCREENSHOT_BROWSER;
+  process.env.QQ_SCREENSHOT_BROWSER = "/synthetic-missing-home-browser";
+  t.after(() => {
+    if (previous === undefined) delete process.env.QQ_SCREENSHOT_BROWSER;
+    else process.env.QQ_SCREENSHOT_BROWSER = previous;
+  });
+  const result = await f.runtime.callTool(f.ctx, "room_scene_view", {
+    type: "room",
+  });
+  assert.equal(result.imageAvailable, false);
+  assert.ok(result.roomContent);
+  assert.equal(result.content, undefined);
+  assert.equal(result.mediaId, undefined);
+  assert.equal(result.effectiveScene.visibleObjectCount, 13);
+});
+
 test("real browser renders persisted scene with the packaged desktop and mobile renderer", async (t) => {
   let executablePath;
   try {
@@ -55,7 +89,49 @@ test("real browser renders persisted scene with the packaged desktop and mobile 
     template: homeTemplate("room"),
     residents: [],
   };
-  const desktop = await renderHomeScene(snapshot, { executablePath });
+  let desktop, renderFailure;
+  const nativeStarted = performance.now();
+  // Keep the native renderer first: a diagnostic browser must not prewarm away
+  // the cold failure. A successful probe never replaces that original failure.
+  try {
+    desktop = await renderHomeScene(snapshot, { executablePath });
+  } catch (error) {
+    renderFailure = error;
+  }
+  t.diagnostic(
+    JSON.stringify({
+      name: "native-cold",
+      status: renderFailure ? "failed" : "success",
+      elapsedMs: Math.round(performance.now() - nativeStarted),
+    }),
+  );
+  try {
+    await checkChromePipeStages(t, executablePath);
+  } catch (error) {
+    if (!renderFailure) throw error;
+    t.diagnostic(
+      "chrome-cdp-pipe-stages: probe also failed; original renderer failure preserved",
+    );
+  }
+  if (renderFailure) {
+    // This control only diagnoses cold cost versus the inherited native pipe.
+    // Its success cannot rescue the initial failure or produce the required image.
+    const warmStarted = performance.now();
+    let warmStatus = "success";
+    try {
+      await renderHomeScene(snapshot, { executablePath });
+    } catch {
+      warmStatus = "failed";
+    }
+    t.diagnostic(
+      JSON.stringify({
+        name: "native-warm-diagnostic",
+        status: warmStatus,
+        elapsedMs: Math.round(performance.now() - warmStarted),
+      }),
+    );
+    throw renderFailure;
+  }
   assert.equal(desktop.readUInt32BE(16), 960);
   assert.equal(desktop.readUInt32BE(20), 640);
   snapshot.view.layout.palette = "rose";
@@ -138,6 +214,45 @@ test("scene image survives MCP and existing OpenAI and Antigravity input adapter
     media.close();
   }
   assert.equal(media.catalog().length, 0);
+});
+
+test("social room snapshots include furniture and name without private display slots or share media", async (t) => {
+  const f = setup(t);
+  const room = await f.runtime.executeTool(f.ctx, "room_read", {});
+  for (const slot of ["tagline", "intro"]) {
+    await f.runtime.executeTool(f.ctx, "room_publish", {
+      identityGeneration: room.identityGeneration,
+      requestId: "private-" + slot,
+      slot,
+      expectedItemRevision: 0,
+      title: "合成资料",
+      body: "PRIVATE_ROOM_" + slot,
+      source: "original-text",
+    });
+  }
+  f.ctx.runtimeKind = "subject-social";
+  let rendered;
+  const result = await homeSceneView(
+    f.runtime,
+    f.ctx,
+    { type: "room" },
+    async (snapshot) => {
+      rendered = snapshot;
+      return png;
+    },
+  );
+  const description = JSON.parse(result.content[0].text);
+  assert.equal(rendered.roomContent, undefined);
+  assert.equal(rendered.residents[0].tagline, undefined);
+  assert.equal(rendered.residents[0].name, f.runtime.agent(f.ctx.agentId).name);
+  assert.doesNotMatch(JSON.stringify(description), /PRIVATE_ROOM_/);
+  assert.equal(description.mediaId, undefined);
+  assert.equal(description.effectiveScene.visibleObjectCount, 13);
+  assert.equal(result.content[1].type, "image");
+  await assert.rejects(
+    homeSceneView(f.runtime, f.ctx, { type: "hall" }),
+    /HOME_SOURCE_DENIED/,
+  );
 });
 
 test("native media dedup preserves independently authorized sources", async () => {
@@ -280,7 +395,7 @@ test("OpenAI batch retract cannot first deliver or persist stale scene text or p
           return homeSceneView(f.runtime, f.ctx, { type: "room" }, async () => {
             if (mode === "render-failed")
               throw Error("SCREENSHOT_BROWSER_MISSING");
-            return Buffer.from("synthetic-pixels");
+            return png;
           });
         return f.runtime.executeTool(f.ctx, "room_retract", {
           identityGeneration: view.identityGeneration,
@@ -518,7 +633,7 @@ test("shared scene decorations expose only own tagline and bind its independent 
   let room, hall;
   await homeSceneView(f.runtime, f.ctx, { type: "room" }, async (snapshot) => {
     room = snapshot;
-    return Buffer.from("synthetic-room");
+    return png;
   });
   assert.equal(room.residents.length, 1);
   assert.equal(room.residents[0].tagline, tagA);
@@ -597,3 +712,85 @@ test("MCP delivery rejects invalid observations and validator errors while ordin
     }
   });
 });
+
+async function checkChromePipeStages(t, executablePath) {
+  const fs = await import("node:fs/promises"),
+    os = await import("node:os"),
+    path = await import("node:path"),
+    { fileURLToPath } = await import("node:url"),
+    { randomUUID } = await import("node:crypto"),
+    { chromium } = await import("playwright-core"),
+    { buildChildEnv } = await import("../src/core/child-env.mjs"),
+    { homeBrowserArguments, stopHomeBrowser } =
+      await import("../src/home/browser-process.mjs");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "home-chrome-cdp-"));
+  const marker = path.join(root, "wrapper.pid"),
+    controlFile = path.join(root, "control.json"),
+    traceFile = path.join(root, "fixed-protocol-ids.json");
+  const control = {
+    nonce: randomUUID(),
+    endpoint:
+      process.platform === "win32"
+        ? String.raw`\\.\pipe\qq-home-cdp-${randomUUID()}`
+        : path.join(root, "control.sock"),
+    arguments: [
+      fileURLToPath(new URL("./fixtures/home-cdp-relay.mjs", import.meta.url)),
+      traceFile,
+      executablePath,
+      ...homeBrowserArguments(path.join(root, "profile")),
+    ],
+  };
+  await fs.writeFile(controlFile, JSON.stringify(control), { mode: 0o600 });
+  let browser;
+  const started = performance.now();
+  try {
+    browser = await chromium.launch({
+      executablePath: process.execPath,
+      ignoreDefaultArgs: true,
+      timeout: 15000,
+      env: buildChildEnv("browser"),
+      args: [
+        fileURLToPath(
+          new URL("../src/home/browser-launcher.mjs", import.meta.url),
+        ),
+        marker,
+        process.execPath,
+        path.join(root, "profile"),
+        controlFile,
+      ],
+    });
+    assert.ok(browser.version());
+  } finally {
+    try {
+      if (browser)
+        await Promise.race([
+          browser.close().catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 500)),
+        ]);
+    } finally {
+      // The relay writes only bounded, reviewed method labels and numeric ids.
+      const frames = JSON.parse(
+        await fs.readFile(traceFile, "utf8").catch(() => "[]"),
+      );
+      const version = browser?.version();
+      t.diagnostic(
+        JSON.stringify({
+          name: "chrome-cdp-pipe-stages",
+          elapsedMs: Math.round(performance.now() - started),
+          version:
+            typeof version === "string" && /^\d+(?:\.\d+){1,3}$/.test(version)
+              ? version
+              : null,
+          frames,
+        }),
+      );
+      await stopHomeBrowser(marker, control);
+      await fs.rm(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      });
+    }
+  }
+}

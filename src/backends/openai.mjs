@@ -1,5 +1,7 @@
 // @ts-check
+import { closeSocialSessions, socialSessionPool } from "./social-sessions.mjs";
 import { mediaLease } from "../tools/media-lease.mjs";
+import { runOpenAISocial } from "./openai-social.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -70,6 +72,36 @@ function forgetSentImages(messages) {
 // so there is no remote session to verify: a step is persisted only once the
 // assistant message and every tool result for it are complete.
 export class OpenAIBackend {
+  /** @param {{windowId?: string, actorGeneration?: string}} [filter] */
+  async closeSocialSessions(filter = {}) {
+    await closeSocialSessions(this, filter);
+  }
+  /** Isolated social execution never enters the ordinary session loop.
+   * @param {any} params */
+  async runSocial(params) {
+    const controller = new AbortController();
+    this.active.add(controller);
+    try {
+      return await runOpenAISocial({
+        ...params,
+        signal: AbortSignal.any([params.signal, controller.signal]),
+        endpoint: this.endpoint("/chat/completions"),
+        model: this.config.model,
+        profileId: this.config.socialProfile,
+        vision: this.config.vision === true,
+        formatToolResult: (
+          /** @type {any} */ call,
+          /** @type {any} */ result,
+          /** @type {AbortSignal} */ signal,
+        ) => this.toolMessages(call, async () => result, signal),
+        headers: () => this.headers(),
+        fetch: this.fetch,
+        sessionPool: socialSessionPool(this, async () => {}),
+      });
+    } finally {
+      this.active.delete(controller);
+    }
+  }
   /**
    * @param {BackendConfig} config
    * @param {import("./session-contract.mjs").BackendAgent} agent
@@ -242,11 +274,11 @@ export class OpenAIBackend {
                     role: value.role,
                     tool_call_id: value.tool_call_id,
                     content:
-                      "受控场景观察未持久保存；需要时重新读取当前授权版本。",
+                      "受控场景观察未写入会话记录；需要时重新读取当前授权版本。",
                   }
                 : {
                     type: "text",
-                    text: "受控场景图片未持久保存；需要时重新调用 room_scene_view 取得当前授权版本。",
+                    text: "受控场景图片未写入会话记录；本人房间照片可用 media_list 找回，或重新调用 room_scene_view 查看当前场景。",
                   }),
             }
           : value,
@@ -508,6 +540,7 @@ export class OpenAIBackend {
   async close() {
     this.closing = true;
     await this.cancel();
+    await this.closeSocialSessions();
     await this.external.close();
   }
 }

@@ -57,6 +57,16 @@ export function dshTurnFailure(reason, turnId) {
       String(turnId),
       true,
     );
+  // The native terminal reason classifies a provider transport failure;
+  // a bridge-side loss of the event subscription proves no terminal outcome.
+  if (reason?.kind === "error" && code === "TRANSPORT")
+    return new BackendTurnFailure(
+      "dsh",
+      code,
+      "response-stream",
+      String(turnId),
+      true,
+    );
   const category = reason?.kind === "cancelled" ? "cancelled" : "unknown";
   return new BackendTurnFailure("dsh", "TURN_FAILED", category, String(turnId));
 }
@@ -178,6 +188,7 @@ export async function runWithRecovery(
         recovery,
         ...(recovery
           ? {
+              inputImages: [],
               prompt:
                 "上一轮因可恢复的生成错误结束。继续尚未完成的部分，不要重做已经成功的工具操作；已发送或投递结果未知的 QQ 消息不得重发，不得换 requestId 或改写文案重发。依据保留的工具结果继续；若已完成则结束本轮。" +
                 (recovery.deliveryBlocked

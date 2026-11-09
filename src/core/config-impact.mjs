@@ -92,6 +92,7 @@ function agentPolicy(value) {
   } = value.scheduler;
   return {
     ...rest,
+    imageInputEnabled: value.behavior.imageInput.enabled,
     scheduler,
     tools: unordered(value.tools),
     ownerIds: unordered(value.ownerIds),
@@ -169,6 +170,7 @@ export function configImpact(before, after) {
     globalPaused: _g,
     privateLikeGroups: _privateLikeGroups,
     peerLimit: _peerLimit,
+    homeSocial: _homeSocial,
     ...oldGlobal
   } = before;
   const {
@@ -179,6 +181,7 @@ export function configImpact(before, after) {
     globalPaused: _ng,
     privateLikeGroups: _newPrivateLikeGroups,
     peerLimit: _newPeerLimit,
+    homeSocial: _newHomeSocial,
     ...newGlobal
   } = after;
   const globalChanged = !isDeepStrictEqual(oldGlobal, newGlobal);
