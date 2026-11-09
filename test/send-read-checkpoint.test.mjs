@@ -52,6 +52,8 @@ test("qq_send accepts the optional continuous read checkpoint and teaches its sa
   assert(!send.inputSchema.required.includes("readThroughSeq"));
   assert.match(instructions, /qq_send\.readThroughSeq/);
   assert.match(instructions, /发送期间新到的消息顺带标为已读/);
+  assert.match(send.description, /仅普通消息回复回合/);
+  assert.match(send.description, /主动意图回合不得携带/);
   assert.doesNotMatch(sendOnlyInstructions, /qq_send\.readThroughSeq/);
 });
 
@@ -139,7 +141,7 @@ test("omitting readThroughSeq preserves qq_send's existing read behavior", async
   assert.equal(runtime.transports.get("qq-0").sent.length, 1);
 });
 
-test("a selected proactive intent cannot bind a checkpoint to its rewritten delivery request", async (t) => {
+test("a selected proactive intent gets a dedicated pre-delivery checkpoint rejection", async (t) => {
   const { runtime, store } = setup(t),
     ctx = context(runtime),
     mem = store.bind(ctx.agentId),
@@ -151,10 +153,15 @@ test("a selected proactive intent cannot bind a checkpoint to its rewritten deli
       text: "收到。",
       readThroughSeq: shown,
     }),
-    /TOOL_NOT_ALLOWED/,
+    /INTENT_READ_CHECKPOINT_NOT_ALLOWED/,
   );
   assert.equal(runtime.transports.get("qq-0").sent.length, 0);
+  assert.equal(mem.delivery("model-request"), undefined);
   assert.equal(mem.state(ctx.conversation).readThroughSeq || 0, 0);
+  assert.deepEqual(
+    mem.state(ctx.conversation).readCheckpointReceipts || {},
+    {},
+  );
 });
 
 test("prototype-named request IDs without checkpoint history cannot acquire a watermark on retry", async (t) => {

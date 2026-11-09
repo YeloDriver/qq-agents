@@ -14,6 +14,7 @@ const terminal = new Set([
   "unknown",
 ]);
 const norm = (s) => s.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+const GROWTH_CONSIDERATION_INTERVAL_MS = 86400000;
 export class SubjectCoordinator {
   constructor(runtime) {
     this.runtime = runtime;
@@ -485,6 +486,9 @@ export class SubjectCoordinator {
 
   begin(ctx, reasons) {
     const m = this.memory(ctx.agentId);
+    ctx.growthConsideration =
+      ctx.conversation === SUBJECT &&
+      reasons.some((reason) => reason.growthConsideration === true);
     ctx.intentIds = reasons
       .filter(
         (x) =>
@@ -536,6 +540,12 @@ export class SubjectCoordinator {
           s.activityCursor || 0,
           ctx.activityThroughSeq || 0,
         ),
+        ...(ctx.growthConsideration
+          ? {
+              lastGrowthConsiderationAt:
+                ctx.turnStartedAt ?? this.runtime.now(),
+            }
+          : {}),
       });
     }
     if (!a) return;
@@ -626,16 +636,27 @@ export class SubjectCoordinator {
             ["pending", "observing"].includes(c.status) && c.reviewAfter <= now,
         )
         .map((c) => c.id);
+      const growthConsideration =
+        !Number.isSafeInteger(s.lastGrowthConsiderationAt) ||
+        s.lastGrowthConsiderationAt <= now - GROWTH_CONSIDERATION_INTERVAL_MS;
+      const instruction = [
+        "空闲时间开始。activities 是上次空闲以来最新的一批来信原始记录 ID（按时间先后），需要时按 ID 回查；更早的 activityOverflow 条没有列出，不必补读，仍在事件库里可按会话检索。候选与未完成意图可按需读取；没有到期候选不必回顾旧候选。",
+        ...(growthConsideration
+          ? [
+              "growthConsideration=true：可轻量检查近期经历是否支持稳定的兴趣、习惯或关系变化；只有来源和反例经核对后仍值得记录时，才考虑提出新的 Self 候选。没有变化就不提案、不改写 Self。",
+            ]
+          : []),
+      ].join(" ");
       r.trackJob(
         r.wake(a.id, SUBJECT, {
           reasons: [
             {
               reason: "subject-opportunity",
+              ...(growthConsideration ? { growthConsideration: true } : {}),
               candidateIds: candidates,
               activities,
               activityOverflow: Math.max(0, pending - activities.length),
-              instruction:
-                "空闲时间开始。activities 是上次空闲以来最新的一批来信原始记录 ID（按时间先后），需要时按 ID 回查；更早的 activityOverflow 条没有列出，不必补读，仍在事件库里可按会话检索。候选与未完成意图可按需读取；没有到期候选不必专门回顾人格。",
+              instruction,
             },
           ],
         }),

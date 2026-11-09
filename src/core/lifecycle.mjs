@@ -821,6 +821,7 @@ export class ContextLifecycle {
       status: "running",
       inputStage: "not-submitted",
       reason: reasons.map((x) => x.reason),
+      ...(ctx.intentIds?.length ? { intentIds: [...ctx.intentIds] } : {}),
       initialSession: ctx.initialSession,
       promptChars: prompt.length,
       instructionsChars: ctx.initialSession ? instructions.length : 0,
@@ -935,6 +936,7 @@ export class ContextLifecycle {
         phase: "finished",
         endedAt: this.runtime.now(),
         toolCalls: ctx.toolCalls || [],
+        ...(ctx.activeIntentId ? { activeIntent: ctx.activeIntentId } : {}),
       });
     }
   }

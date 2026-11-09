@@ -279,6 +279,7 @@ function persistReadCheckpoint(runtime, ctx, throughSeq) {
 }
 async function handle_qq_send(runtime, ctx, args, name) {
   if (args.readThroughSeq !== undefined) {
+    if (ctx.activeIntentId) throw Error("INTENT_READ_CHECKPOINT_NOT_ALLOWED");
     if (!readCheckpointToolEnabled(runtime, ctx))
       throw Error("TOOL_NOT_ALLOWED");
     assertReadCheckpoint(ctx, args.readThroughSeq);

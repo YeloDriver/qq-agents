@@ -147,6 +147,8 @@ function safeFailure(error) {
       "This context has read protected repository or operations material. Arbitrary queries, board names, QQ cards and sharing remain restricted. Check app_capabilities.fixedPublicReads: fixed recommend/hot/following/ranking feeds without board and their returned platform recordId reads can still work without sending recalled text. Do not retry the rejected action or assume the next chat message clears protection.",
     SUBJECT_EXTERNAL_TOOL_NOT_READ_ALLOWED:
       "The supplied serverId/tool pair is outside subject.externalReads. Use external_tools to inspect subjectReadAllowlist and callFormat; external_tool requires serverId, tool and arguments. This rejection does not mean every external read is disabled.",
+    SUBJECT_SOURCE_INVALID:
+      "Use the sourceRecordId returned by your actual app or web reading; do not guess or use another role's records.",
     RECALL_SOURCE_NOT_ALLOWED:
       "This protected record was not read in this conversation. Use ordinary conversation records instead. Only isolated protected work tasks may recall protected records; do not retry another representation of the same source.",
     PRIVATE_RECOLLECTION_REQUIRES_DISCLOSURE_GRANT:
@@ -159,6 +161,8 @@ function safeFailure(error) {
       "The platform returned the same continuation without buffered new content. The old cursor is preserved, but no page was committed. Do not claim completion or repeatedly retry; report the stalled pagination.",
     INTENT_DECISION_REQUIRED:
       "This turn was woken only for proactive intentions. A successful cancel/defer remains saved, but does not authorize another proactive send. Read conversation_read or qq_wait_for_messages: fully reading a genuinely new human message received after this wake allows an ordinary reply when no intent is selected. If there is no new input, finish without sending. Do not repeat the blocked burst or change requestId to bypass the gate; preserve all existing receipts.",
+    INTENT_READ_CHECKPOINT_NOT_ALLOWED:
+      "This call was rejected before delivery reservation: this call sent nothing and did not alter any existing receipt. Omit readThroughSeq and keep the same requestId only if the selected intent is still fresh and has no prior delivery receipt. The send path rechecks new input, permission, pause state, expiry, cooldown and contact budget. If any earlier receipt exists, inspect it first; never retry a pending or unknown delivery.",
     INTENT_CORRECTION_REVIEW_REQUIRED:
       "This intention depends on a corrected belief. Read memory_corrections and the intention, then cancel/update it or mark a genuinely unrelated dependency unaffected. Do not send from this intention until review is complete; preserve existing receipts.",
     INTENT_STALE_REFRESH_REQUIRED:
