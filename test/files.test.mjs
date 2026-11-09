@@ -37,6 +37,19 @@ test("local directory grants cannot import another agent's library", (t) => {
   );
 });
 
+test("local directory grants cannot import relay credentials or temporary credential files", (t) => {
+  const root = temp(t);
+  const library = new FileStore(path.join(root, "files"));
+  const policy = filesSchema.parse({ localRoots: [root] });
+  for (const name of ["relay-token", "relay-token.copy.tmp"]) {
+    fs.writeFileSync(path.join(root, name), "synthetic-private-relay");
+    assert.throws(
+      () => library.import("agent-a", 0, name, policy),
+      /FILE_PATH_DENIED/,
+    );
+  }
+});
+
 test("revocation prevents queued uploads while preserving an already confirmed in-flight receipt", async (t) => {
   const { runtime, ctx, store, configStore } = await setup(t);
   const file = await call(runtime, ctx, "file_create", {
@@ -72,11 +85,17 @@ test("revocation prevents queued uploads while preserving an already confirmed i
     configStore.revision,
   );
   finish({ confirmed: true, fileId: "receipt" });
-  assert.equal((await first).status, "sent");
+  const receipt = await first;
+  assert.equal(receipt.status, "sent");
   await rejection;
   assert.equal(sends, 1);
-  assert.equal(store.bind("agent-0").delivery("first").status, "sent");
-  assert.equal(store.bind("agent-0").delivery("queued"), undefined);
+  const deliveries = store.db
+    .prepare("SELECT request_id,status FROM deliveries WHERE agent_id=?")
+    .all("agent-0");
+  assert.deepEqual(
+    deliveries.map(({ request_id, status }) => [request_id, status]),
+    [[receipt.requestId, "sent"]],
+  );
 });
 
 async function setup(t, options = {}) {
@@ -253,10 +272,8 @@ test("file creation and autonomous send use current conversation, receipts and e
     text: "本周总结",
   });
   const input = { requestId: "send-once", fileId: meta.fileId };
-  assert.equal(
-    (await call(runtime, ctx, "qq_send_file", input)).gatewayFileId,
-    "qq-file-fixture",
-  );
+  const receipt = await call(runtime, ctx, "qq_send_file", input);
+  assert.equal(receipt.gatewayFileId, "qq-file-fixture");
   assert.equal(
     (await call(runtime, ctx, "qq_send_file", input)).duplicate,
     true,
@@ -266,7 +283,10 @@ test("file creation and autonomous send use current conversation, receipts and e
   ]);
   assert.equal(runtime.operations.pending.size, 0);
   assert.equal(runtime.status().disclosureRequests.length, 0);
-  assert.equal(store.bind("agent-0").delivery("send-once").status, "sent");
+  assert.equal(
+    store.bind("agent-0").delivery(receipt.requestId).status,
+    "sent",
+  );
   const other = runtime.makeContext("agent-1", "group:20000");
   await assert.rejects(
     call(runtime, other, "qq_send_file", { ...input, requestId: "other" }),

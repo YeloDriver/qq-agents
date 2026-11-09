@@ -148,7 +148,15 @@ test("recipient view is acknowledged only after successful leased model consumpt
     release = Promise.withResolvers(),
     db = f.store.db;
   const c = context(r, "agent-1", "@subject");
-  r.socialRuntime.capabilities(c, {});
+  const capabilities = r.socialRuntime.capabilities(c, {});
+  assert.deepEqual(capabilities.pendingTargets, [
+    { kind: "invitation", id: inv.id },
+  ]);
+  assert.match(
+    capabilities.notice,
+    /home_social_process.*compose.*pendingTargets/,
+  );
+  assert.match(capabilities.notice, /不会唤醒对方/);
   r.capabilities.delete(c.token);
   r.homeSocial.adminRead(SOCIAL_ADMIN_PRINCIPAL, {
     kind: "invitation",
@@ -677,8 +685,8 @@ for (const revoked of [false, true]) {
   });
 }
 
-function setup(t) {
-  const cfg = config(2);
+function setup(t, count = 2) {
+  const cfg = config(count);
   cfg.homeSocial = {
     enabled: true,
     exchangeEnabled: true,
@@ -2096,7 +2104,7 @@ async function handoffReply(f, params, handoff) {
 function closeTestWindow(f, windowId) {
   const r = f.runtime;
   r.homeSocial.store.transaction((now) =>
-    r.socialRuntime.exchange.closeRow(
+    r.homeSocial.store.closeWindow(
       f.store.db
         .prepare("SELECT * FROM home_social_windows WHERE id=?")
         .get(windowId),
@@ -2553,6 +2561,147 @@ test("failed old-session cleanup blocks adapter rebuild without charging another
         "SELECT count(*) n FROM home_social_dispatches WHERE window_id=? AND status='queued'",
       )
       .get(windowId).n,
+    0,
+  );
+});
+
+async function activeWindow(f) {
+  const r = f.runtime;
+  const visit = await visitFixture(f);
+  const target = { kind: "visit", id: visit.id };
+  const actor = boundContext(f, "agent-0", target);
+  const recipient = boundContext(f, "agent-1", target);
+  const proposal = r.socialRuntime.exchange.propose(actor, {
+    requestId: randomUUID(),
+    visitId: visit.id,
+  }).result;
+  r.socialRuntime.exchange.decide(recipient, {
+    requestId: randomUUID(),
+    windowId: proposal.windowId,
+    expectedWindowRevision: 1,
+    termsRevision: proposal.termsRevision,
+    accept: true,
+  });
+  return { actor, target, windowId: proposal.windowId };
+}
+
+for (const source of ["administrator", "participant"]) {
+  test(`closing an exchange through ${source} only cancels its own dispatch`, async (t) => {
+    const f = setup(t),
+      r = f.runtime,
+      db = f.store.db;
+    const { actor, target, windowId } = await activeWindow(f);
+    const asyncWork = await f.process("agent-0", target);
+    const { revision } = db
+      .prepare("SELECT revision FROM home_social_windows WHERE id=?")
+      .get(windowId);
+    if (source === "administrator") {
+      r.homeSocial.moderate(SOCIAL_ADMIN_PRINCIPAL, {
+        requestId: randomUUID(),
+        policyRevision: r.homeSocial.policy().revision,
+        action: "close-window",
+        targetId: windowId,
+        expectedRevision: revision,
+      });
+    } else {
+      r.socialRuntime.exchange.close(actor, {
+        requestId: randomUUID(),
+        windowId,
+        expectedWindowRevision: revision,
+      });
+    }
+    const work = db
+      .prepare(
+        `SELECT d.mode,d.status AS dispatch,o.status AS outbox
+      FROM home_social_dispatches d JOIN home_social_outbox o ON d.dedupe_key=o.dedupe_key
+      WHERE d.window_id=? OR d.turn_id=? ORDER BY d.mode`,
+      )
+      .all(windowId, asyncWork.result.turnId);
+    assert.deepEqual(
+      work.map((x) => [x.mode, x.dispatch, x.outbox]),
+      [
+        ["async", "queued", "pending"],
+        ["window", "cancelled", "cancelled"],
+      ],
+    );
+  });
+}
+
+test("configuration revokes only affected exchanges and ignores backend display labels", async (t) => {
+  const f = setup(t, 3),
+    r = f.runtime,
+    db = f.store.db;
+  const { windowId } = await activeWindow(f);
+  const status = () =>
+    db
+      .prepare("SELECT status FROM home_social_windows WHERE id=?")
+      .get(windowId).status;
+  const change = async (modify) => {
+    const config = structuredClone(r.config);
+    modify(config);
+    assert.equal(
+      (await r.changeConfig(config, f.configStore.revision)).saved,
+      true,
+    );
+  };
+  const policy = r.homeSocial.policy().revision;
+  await change((config) => {
+    config.backends[0].label = "New display label";
+  });
+  assert.equal(status(), "active");
+  assert.equal(r.homeSocial.policy().revision, policy);
+  await change((config) => {
+    config.agents[2].paused = true;
+  });
+  assert.equal(status(), "active");
+  assert.ok(r.homeSocial.policy().revision > policy);
+  await change((config) => {
+    config.agents[1].paused = true;
+  });
+  assert.equal(status(), "closed");
+});
+
+test("unified social decisions queue a visit or an activity without auto-inviting or starting a window", async (t) => {
+  const f = setup(t),
+    r = f.runtime;
+  r.agent("agent-0").subject.inboxEnabled = true;
+  const visit = await visitFixture(f);
+  f.setScript(() => []);
+  const chat = context(r, "agent-0", "group:20000");
+  const subject = context(r, "agent-0", "@subject");
+  const invitations = f.store.db
+    .prepare("SELECT count(*) AS n FROM home_social_invitations")
+    .get().n;
+  for (const [key, target] of [
+    ["compose", { kind: "compose", id: "agent-1" }],
+    ["activity", { kind: "visit", id: visit.id }],
+  ]) {
+    const intent = await r.callTool(chat, "subject_inbox_submit", {
+      requestId: key,
+      proposal: { kind: "social", target, note: "仅主人格可见的聊天备注" },
+    });
+    const args = { id: intent.id, expectedRevision: 1, action: "social" };
+    assert.equal(
+      (await r.callTool(subject, "subject_inbox_decide", args)).socialStatus,
+      "queued",
+    );
+    assert.equal(
+      (await r.callTool(subject, "subject_inbox_decide", args)).socialStatus,
+      "queued",
+    );
+    await f.pump();
+    const prompt = JSON.stringify(f.requests.at(-1).body);
+    assert.doesNotMatch(prompt, /仅主人格可见的聊天备注/);
+    if (key === "activity") assert.match(prompt, /商量共同活动/);
+  }
+  assert.equal(
+    f.store.db
+      .prepare("SELECT count(*) AS n FROM home_social_invitations")
+      .get().n,
+    invitations,
+  );
+  assert.equal(
+    f.store.db.prepare("SELECT count(*) AS n FROM home_social_windows").get().n,
     0,
   );
 });

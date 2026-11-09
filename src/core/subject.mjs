@@ -1,4 +1,6 @@
-import { rhythmStatus } from "./rhythm.mjs";
+import { needsSubjectReview } from "./subject-inbox-sources.mjs";
+import { refreshAgentRhythm, rhythmStatus } from "./rhythm.mjs";
+import { roleRest, settleRoleRest, subjectInboxEnabled } from "./role-rest.mjs";
 import { randomUUID } from "node:crypto";
 import { allowed, inSilence } from "./config.mjs";
 import { SUBJECT } from "./lifecycle.mjs";
@@ -138,6 +140,8 @@ export class SubjectCoordinator {
       now = r.now();
     return (
       this.internalAllowed(a) &&
+      !roleRest(r, a) &&
+      !r.subjectInbox.focus(a) &&
       rhythmStatus(r, a, true).state !== "sleeping" &&
       this.targetAllowed(a, target) &&
       r.writable(a, target) &&
@@ -182,7 +186,8 @@ export class SubjectCoordinator {
       state = "silenced";
     else if (r.backendConnections.blocked.has(a.id)) state = "recovering";
     else if (r.running.has(a.id + "|" + SUBJECT)) state = "running";
-    else if (rhythmStatus(r, a).state === "sleeping") state = "sleeping";
+    else if (roleRest(r, a) || rhythmStatus(r, a).state === "sleeping")
+      state = "sleeping";
     else if (checks.length >= limit) state = "budget-exhausted";
     else state = nextEligibleAt > now ? "waiting" : "due";
     return {
@@ -308,6 +313,8 @@ export class SubjectCoordinator {
         ...proof.references.map((ref) => ref.metadata),
       ),
     };
+    if (subjectInboxEnabled(a) && needsSubjectReview(i))
+      i.subjectReview = { reviewAt: now };
     const saved = this.save(a.id, i);
     trackMindRecords(r, ctx, [saved], "intent");
     return saved;
@@ -418,13 +425,13 @@ export class SubjectCoordinator {
       throw Error("INTENT_STALE_REFRESH_REQUIRED");
     return i;
   }
-  beforeDelivery(ctx) {
+  beforeDelivery(ctx, evidence = ctx) {
     if (ctx.conversation === SUBJECT) throw Error("SUBJECT_CANNOT_SEND_QQ");
     if (ctx.intentOnly && !ctx.activeIntentId)
       throw Error("INTENT_DECISION_REQUIRED");
     if (!ctx.activeIntentId) return null;
     const i = this.assertFresh(ctx);
-    trackMindRecords(this.runtime, ctx, [i], "intent");
+    trackMindRecords(this.runtime, evidence, [i], "intent");
     const s = this.memory(ctx.agentId).state(SUBJECT),
       a = this.runtime.agent(ctx.agentId),
       now = this.runtime.now();
@@ -565,6 +572,8 @@ export class SubjectCoordinator {
     const r = this.runtime,
       now = r.now();
     for (const a of r.config.agents) {
+      if (subjectInboxEnabled(a) && settleRoleRest(r, a))
+        refreshAgentRhythm(r, a);
       const m = this.memory(a.id);
       // Terminal intentions accumulate forever; the 1 Hz tick only needs open ones.
       const open = m.db
@@ -579,6 +588,10 @@ export class SubjectCoordinator {
         else if (
           ["waiting", "deferred"].includes(i.status) &&
           i.eligibleAt <= now &&
+          !(
+            (subjectInboxEnabled(a) || i.subjectReview) &&
+            needsSubjectReview(i)
+          ) &&
           this.canAutoDisclose(a, i) &&
           this.contactOpportunity(a, i.target)
         ) {
@@ -598,8 +611,10 @@ export class SubjectCoordinator {
           });
         }
       }
+      if (r.subjectInbox.dispatch(a)) continue;
       if (
         !this.internalAllowed(a) ||
+        roleRest(r, a) ||
         rhythmStatus(r, a, true).state === "sleeping" ||
         r.running.has(a.id + "|" + SUBJECT) ||
         r.subjectExecution?.busy(a.id) ||

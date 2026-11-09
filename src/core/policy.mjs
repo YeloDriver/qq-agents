@@ -14,6 +14,7 @@ export const timezone = z.string().refine((s) => {
     return false;
   }
 }, "INVALID_TIMEZONE");
+export const DEFAULT_MAX_OPEN_DRAFTS = 4;
 export const behaviorSchema = z
   .object({
     imageInput: z
@@ -27,6 +28,7 @@ export const behaviorSchema = z
       })
       .strict()
       .prefault({}),
+    focusedGroupReply: z.boolean().default(false),
     batchWindowMs: ms(0, 60000, 0),
     batchMaxMs: ms(0, 60000, 0),
     maxWakePerMinute: ms(1, 60, 6),
@@ -66,6 +68,7 @@ export const behaviorSchema = z
       })
       .strict()
       .prefault({}),
+    maxOpenDraftsPerConversation: ms(1, 16, DEFAULT_MAX_OPEN_DRAFTS),
     burstMax: ms(1, 10, 8),
     burstMinMs: ms(0, 10000, 1000),
     burstMaxMs: ms(0, 10000, 3000),
@@ -326,6 +329,7 @@ export const filesSchema = z
     receive: z.boolean().default(true),
     send: z.boolean().default(true),
     create: z.boolean().default(true),
+    delete: z.boolean().default(false),
     maxBytes: ms(1024, 52428800, 20971520),
     maxTotalBytes: ms(1024, 5368709120, 209715200),
     maxFiles: ms(1, 10000, 1000),

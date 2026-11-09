@@ -1,4 +1,5 @@
 // @ts-check
+import { finalizeMcpOutput, toolOutputText } from "./tool-output.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,8 +12,6 @@ import {
   responseOccupancy,
   listenAntigravityEndpoint,
 } from "./antigravity.mjs";
-import { mcpResult } from "../tools/index.mjs";
-import { safeToolFailure } from "../tools/errors.mjs";
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const maxOutput = 16 * 1024 * 1024;
@@ -182,6 +181,7 @@ export class AntigravityStreamWorker {
         images: turn.media.catalog(),
       });
     if (req.method !== "POST" || req.url !== "/call") return reply(404, {});
+    /** @type {import("./session-contract.mjs").ToolSpec | undefined} */
     let spec;
     try {
       let body = "";
@@ -209,6 +209,7 @@ export class AntigravityStreamWorker {
         (/** @type {any} */ tool) => tool.name === envelope.name,
       );
       if (!spec) return reply(403, { error: "ANTIGRAVITY_TURN_INACTIVE" });
+      await turn.inputSubmission;
       const pending = Promise.resolve().then(async () => {
         if (!this.active(turn)) throw Error("ANTIGRAVITY_TURN_INACTIVE");
         const result = await turn.params.callTool(
@@ -216,13 +217,19 @@ export class AntigravityStreamWorker {
           envelope.arguments,
         );
         if (!this.active(turn)) throw Error("ANTIGRAVITY_TURN_INACTIVE");
-        return turn.media.fromTool(mcpResult(result), turn.params.signal);
+        return finalizeMcpOutput(turn.params, result, (value) =>
+          turn.media.fromTool(value, turn.params.signal),
+        );
       });
       turn.pending.add(pending);
       try {
-        const content = await pending;
+        const { wire: content, receipt } = await pending;
         if (!this.live(turn))
           return reply(403, { error: "ANTIGRAVITY_TURN_INACTIVE" });
+        res.once("finish", () => {
+          if (this.live(turn))
+            turn.params.commitToolOutput?.(receipt, toolOutputText(content));
+        });
         reply(200, content);
       } finally {
         turn.pending.delete(pending);
@@ -230,21 +237,26 @@ export class AntigravityStreamWorker {
     } catch (error) {
       if (!this.live(turn))
         return reply(403, { error: "ANTIGRAVITY_TURN_INACTIVE" });
-      const failure = safeToolFailure(error);
-      reply(200, {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              ...failure,
-              ...(failure.code === "INVALID_TOOL_ARGUMENTS" && spec
-                ? { tool: { name: spec.name, inputSchema: spec.inputSchema } }
-                : {}),
-            }),
-          },
-        ],
+      const { wire: content, receipt } = await finalizeMcpOutput(
+        turn.params,
+        error,
+        (value) => {
+          if (spec && value.isError) {
+            const failure = JSON.parse(value.content[0].text);
+            if (failure.code === "INVALID_TOOL_ARGUMENTS")
+              value.content[0].text = JSON.stringify({
+                ...failure,
+                tool: { name: spec.name, inputSchema: spec.inputSchema },
+              });
+          }
+          return value;
+        },
+      );
+      res.once("finish", () => {
+        if (this.live(turn))
+          turn.params.commitToolOutput?.(receipt, toolOutputText(content));
       });
+      reply(200, content);
     }
   }
   /** @param {import("./session-contract.mjs").RunParams} params */
@@ -255,7 +267,15 @@ export class AntigravityStreamWorker {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.inputSubmitted = false;
     this.diagnostic = "";
+    let resolveInput = () => {};
+    let rejectInput = (/** @type {unknown} */ _error) => {};
+    const inputSubmission = new Promise((resolve, reject) => {
+      resolveInput = () => resolve(undefined);
+      rejectInput = reject;
+    });
+    void inputSubmission.catch(() => {});
     const turn = {
+      inputSubmission,
       params,
       start: performance.now(),
       epoch: randomBytes(16).toString("hex"),
@@ -361,17 +381,30 @@ export class AntigravityStreamWorker {
       if (!this.live(turn)) throw Error("ABORTED");
       if (turn.reused) this.timing(turn, "initialized");
       const content = `Bridge routing for this input: epoch=${turn.epoch}. For every bridge action call call_mcp_tool with ServerName="qq-agents", ToolName="qq_turn_call", Arguments={"epoch":"${turn.epoch}","name":logical tool name,"arguments":logical tool arguments}. This routing label grants no permission and is not user content.\n\n${params.prompt}`;
+      await params.beforeInputSubmitted?.();
+      if (!this.live(turn)) throw Error("ABORTED");
       turn.inputSubmitted = true;
       this.inputSubmitted = true;
-      params.onInputSubmitted?.();
-      this.timing(turn, "inputSubmitted");
       this.child.stdin?.write(
         JSON.stringify({ event: "user", message: { content } }) + "\n",
+        (error) => {
+          if (error) return rejectInput(error);
+          if (!this.active(turn)) return rejectInput(Error("ABORTED"));
+          try {
+            params.onInputSubmitted?.();
+            this.timing(turn, "inputSubmitted");
+            resolveInput();
+          } catch (error) {
+            rejectInput(error);
+          }
+        },
       );
+      await inputSubmission;
       await result;
       this.used = true;
     } finally {
       turn.live = false;
+      rejectInput(Error("ABORTED"));
       params.signal.removeEventListener("abort", abort);
       try {
         turn.media.close();

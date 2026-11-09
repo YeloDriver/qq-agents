@@ -1,4 +1,5 @@
 // @ts-check
+import { finalizeMcpOutput, toolOutputText } from "./tool-output.mjs";
 import { closeSocialSessions } from "./social-sessions.mjs";
 import { runNativeSocial } from "./native-social.mjs";
 import fs from "node:fs";
@@ -24,9 +25,7 @@ import {
   SessionUnavailableFailure,
   beforeSessionInput,
 } from "./turn-failure.mjs";
-import { mcpResult } from "../tools/index.mjs";
 import { AntigravityMedia } from "./antigravity-media.mjs";
-import { safeToolFailure } from "../tools/errors.mjs";
 import { AntigravityStreamWorker } from "./antigravity-stream.mjs";
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -796,8 +795,8 @@ export class AntigravityBackend {
       await worker.run({
         ...params,
         onInputSubmitted: () => {
-          params.onInputSubmitted?.();
           inputSubmitted = true;
+          params.onInputSubmitted?.();
         },
         onTiming: (value) =>
           params.onTiming?.({
@@ -907,6 +906,13 @@ export class AntigravityBackend {
     );
     const { key, workspace, binding } = details;
     const token = randomBytes(32).toString("hex");
+    let resolveInput = () => {};
+    let rejectInput = (/** @type {unknown} */ _error) => {};
+    const inputSubmission = new Promise((resolve, reject) => {
+      resolveInput = () => resolve(undefined);
+      rejectInput = reject;
+    });
+    void inputSubmission.catch(() => {});
     let live = true;
     let hookDenied = false;
     let ioFailed = false;
@@ -947,6 +953,7 @@ export class AntigravityBackend {
           images: media.catalog(),
         });
       if (req.method !== "POST" || req.url !== "/call") return reply(404, {});
+      /** @type {import("./session-contract.mjs").ToolSpec | undefined} */
       let spec;
       try {
         let body = "";
@@ -955,6 +962,7 @@ export class AntigravityBackend {
           if (body.length > 1048576) return reply(413, {});
         }
         const value = JSON.parse(body);
+        await inputSubmission;
         if (!live || params.signal.aborted || !names.has(value.name))
           return reply(403, {});
         spec = params.tools.find((tool) => tool.name === value.name);
@@ -975,27 +983,49 @@ export class AntigravityBackend {
           pending.delete(accepted);
         }
         if (!live || params.signal.aborted) return reply(403, {});
-        const content = await media.fromTool(mcpResult(result), params.signal);
+        // ACP can replace large textual MCP results with a file path. The
+        // model must receive the inline review page before it can act on it.
+        const inlineChatInput =
+          this.config.cliProtocol === "acp" &&
+          ((result && typeof result === "object" && "preparation" in result) ||
+            [
+              "conversation_read",
+              "memory_read",
+              "qq_wait_for_messages",
+            ].includes(value.name));
+        const { wire: content, receipt } = await finalizeMcpOutput(
+          params,
+          result,
+          (value) => media.fromTool(value, params.signal),
+          inlineChatInput ? 8192 : undefined,
+        );
         if (!live || params.signal.aborted) return reply(403, {});
+        res.once("finish", () => {
+          if (live && !params.signal.aborted)
+            params.commitToolOutput?.(receipt, toolOutputText(content));
+        });
         reply(200, content);
       } catch (error) {
-        const failure = safeToolFailure(error);
-        reply(200, {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                ...failure,
-                ...(failure.code === "INVALID_TOOL_ARGUMENTS" && spec
-                  ? {
-                      tool: { name: spec.name, inputSchema: spec.inputSchema },
-                    }
-                  : {}),
-              }),
-            },
-          ],
+        const { wire: content, receipt } = await finalizeMcpOutput(
+          params,
+          error,
+          (value) => {
+            if (spec && value.isError) {
+              const failure = JSON.parse(value.content[0].text);
+              if (failure.code === "INVALID_TOOL_ARGUMENTS")
+                value.content[0].text = JSON.stringify({
+                  ...failure,
+                  tool: { name: spec.name, inputSchema: spec.inputSchema },
+                });
+            }
+            return value;
+          },
+        );
+        res.once("finish", () => {
+          if (live && !params.signal.aborted)
+            params.commitToolOutput?.(receipt, toolOutputText(content));
         });
+        reply(200, content);
       }
     });
     const port = await listenAntigravityEndpoint(server, params.signal);
@@ -1017,6 +1047,7 @@ export class AntigravityBackend {
       if (cancelled) return;
       cancelled = true;
       live = false;
+      rejectInput(Error("ABORTED"));
       abortSettlement();
       server.closeAllConnections();
       if (child) {
@@ -1184,7 +1215,11 @@ export class AntigravityBackend {
           if (terminal) {
             ioFailed = true;
             resolve(null);
-          } else reject(Error("ANTIGRAVITY_NOT_FOUND"));
+          } else {
+            const failure = Error("ANTIGRAVITY_NOT_FOUND");
+            rejectInput(failure);
+            reject(failure);
+          }
         });
         child?.once("close", (code, signal) => {
           live = false;
@@ -1212,19 +1247,21 @@ export class AntigravityBackend {
             workerOutcome: "exit-warning",
           });
           if (!terminal) {
-            reject(antigravityFailure(diagnostic));
+            const failure = antigravityFailure(diagnostic);
+            rejectInput(failure);
+            reject(failure);
           }
           if (child) this.stop(child, "SIGKILL");
         });
       });
+      // Startup can fail while the submission fence is still being awaited.
+      void completed.catch(() => {});
       // Prompts and credentials never appear in process arguments. EOF ends this
       // turn's process after its result; subsequent turns explicitly resume by ID.
       await params.beforeInputSubmitted?.();
       if (params.signal.aborted) throw Error("ABORTED");
-      params.onInputSubmitted?.();
-      timing("inputSubmitted");
       inputSubmitted = true;
-      child.stdin?.end(
+      child.stdin?.write(
         JSON.stringify({
           event: "user",
           message: {
@@ -1234,7 +1271,26 @@ export class AntigravityBackend {
               : {}),
           },
         }) + "\n",
+        (error) => {
+          if (error) return rejectInput(error);
+          if (
+            cancelled ||
+            params.signal.aborted ||
+            protocolError ||
+            (!live && !terminalObserved)
+          )
+            return rejectInput(Error("ABORTED"));
+          try {
+            params.onInputSubmitted?.();
+            timing("inputSubmitted");
+            resolveInput();
+          } catch (error) {
+            rejectInput(error);
+          }
+        },
       );
+      child.stdin?.end();
+      await inputSubmission;
       const code = await completed;
       if (cancelled || params.signal.aborted) throw Error("ABORTED");
       if (protocolError) throw protocolError;
@@ -1317,6 +1373,7 @@ export class AntigravityBackend {
     } finally {
       diagnosticActive = false;
       live = false;
+      rejectInput(Error("ABORTED"));
       try {
         media.close();
       } catch {

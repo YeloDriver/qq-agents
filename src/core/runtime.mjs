@@ -27,7 +27,8 @@ import { isDeepStrictEqual } from "node:util";
 import { DeliveryService } from "./delivery.mjs";
 import { recoverDraftArchives } from "./draft-delivery.mjs";
 import { QQDraftStore } from "../memory/qq-drafts.mjs";
-import { attachReviewOriginals } from "./input-review.mjs";
+import { inputScope } from "../memory/input-state.mjs";
+import { safeToolFailure } from "../tools/errors.mjs";
 import { TurnRunner } from "./turn-runner.mjs";
 import { runtimeStatus } from "./runtime-status.mjs";
 import { observeInput } from "./input-progress.mjs";
@@ -46,6 +47,7 @@ import { toolAvailable } from "../tools/catalog.mjs";
 import { appsPolicySchema } from "../apps/policy.mjs";
 import { appDefinitions } from "../apps/tools.mjs";
 import { ContextLifecycle, SUBJECT } from "./lifecycle.mjs";
+import { SubjectInbox } from "./subject-inbox.mjs";
 import { SubjectCoordinator } from "./subject.mjs";
 import { CHAT_MIND_TOOLS, SUBJECT_TOOLS } from "../tools/mind.mjs";
 import { BOARD_TOOLS } from "./board.mjs";
@@ -145,6 +147,7 @@ export class Runtime {
     this.contexts = new ContextLifecycle(this);
     this.generatedImages = new GeneratedImages(this);
     this.subject = new SubjectCoordinator(this);
+    this.subjectInbox = new SubjectInbox(this);
     this.transcripts = new VoiceTranscription(this);
     this.games = new GameHost(this);
     this.protectedWork = new ProtectedWork(this);
@@ -276,15 +279,6 @@ export class Runtime {
       throw Error("PROTECTED_WORK_NOT_ACTIVE");
     const state = mem.state(conversation);
     const recallGeneration = state.recallRecovery?.generation || 0;
-    // Inherit the old read cursor once. New read marks remain independent of
-    // the send review, including when the next turn opens another context.
-    if (
-      /^(group|private):/.test(conversation) &&
-      state.inputReviewFromSeq === undefined
-    ) {
-      state.inputReviewFromSeq = state.readThroughSeq || 0;
-      mem.setState(conversation, state);
-    }
     const ctx = {
       token: randomBytes(32).toString("base64url"),
       agentId,
@@ -296,8 +290,7 @@ export class Runtime {
       grants: new Set(),
       sendCount: 0,
       replyBatchSends: mem.state(conversation).replyBatchSends || 0,
-      reviewReadSeq: state.inputReviewFromSeq || 0,
-      reviewSentSeq: state.inputReviewThroughSeq || 0,
+      inputEpoch: randomUUID(),
       inputBaseline: Math.max(
         mem.state(conversation).readThroughSeq || 0,
         mem.state(conversation).replyInputSeq || 0,
@@ -379,7 +372,7 @@ export class Runtime {
                     "deployment_info",
                     "diagnostics_read",
                   ].includes(n) ||
-                  n === "subject_log" ||
+                  n.startsWith("subject_") ||
                   a.tools.includes(n),
               ),
               ...a.subject.readTools.filter((n) => a.tools.includes(n)),
@@ -494,6 +487,20 @@ export class Runtime {
     )
       throw Error("AGENT_PAUSED_OR_EXPIRED");
     return this.agent(ctx.agentId);
+  }
+  rotateCapability(ctx) {
+    this.assertActive(ctx);
+    this.capabilities.delete(ctx.token);
+    (ctx.retiredCapabilities ??= []).push(ctx.token);
+    ctx.token = randomBytes(32).toString("base64url");
+    this.capabilities.set(ctx.token, ctx);
+    return ctx.token;
+  }
+  containsCapability(ctx, text) {
+    return (
+      text.includes(ctx.token) ||
+      ctx.retiredCapabilities?.some((token) => text.includes(token))
+    );
   }
   capability(token) {
     const ctx = this.capabilities.get(token);
@@ -861,6 +868,7 @@ export class Runtime {
         continue;
       }
       const wake = this.conversations.request(a.id, e.conversation, reason, {
+        allowRestInterrupt: !redactConfirmation && !redactGame,
         seq: archived.seq,
         senderId: e.senderId,
         addressed,
@@ -953,12 +961,151 @@ export class Runtime {
   runBackend(...args) {
     return this.turns.runBackend(...args);
   }
+  stageToolInput(ctx, result, commit, records) {
+    const expected = JSON.parse(JSON.stringify(result));
+    const allowed = () => {
+      const visible = recallBoundary(this, ctx).rows(records);
+      return (
+        visible.length === records.length &&
+        visible.every((row, index) => row === records[index])
+      );
+    };
+    this.stageToolOutput(ctx, result, [
+      {
+        value: result,
+        expected,
+        current: () => {
+          if (!allowed()) throw Error("RECALL_SOURCE_NOT_ALLOWED");
+          return true;
+        },
+        commit: commit && (() => allowed() && commit()),
+      },
+    ]);
+  }
+  stageToolOutput(ctx, result, variants) {
+    (ctx.stagedToolOutputs ??= new WeakMap()).set(result, {
+      epoch: ctx.inputEpoch,
+      scope: /^(group|private):/.test(ctx.conversation)
+        ? inputScope(this, ctx)
+        : null,
+      variants,
+    });
+  }
+  activeOutputEpoch(ctx, epoch, scope) {
+    return (
+      this.capabilities.get(ctx.token) === ctx &&
+      !ctx.controller.signal.aborted &&
+      ctx.expires > Date.now() &&
+      ctx.inputEpoch === epoch &&
+      (!scope || inputScope(this, ctx) === scope)
+    );
+  }
+  async finalizeToolOutput(ctx, original, { encode, maxBytes = Infinity }) {
+    const plan = ctx.stagedToolOutputs?.get(original);
+    if (!plan) return { wire: (await encode(original)).wire };
+    ctx.stagedToolOutputs.delete(original);
+    const stale = () => !this.activeOutputEpoch(ctx, plan.epoch, plan.scope);
+    if (stale()) throw Error("INPUT_EPOCH_CHANGED");
+
+    for (const variant of plan.variants) {
+      const { matches, commit, current } = variant;
+      if (current && !current()) continue;
+      const value = variant.render ? variant.render() : variant.value;
+      const expected = variant.render
+        ? JSON.parse(JSON.stringify(value))
+        : variant.expected;
+      const { wire, text } = await encode(value);
+      if (stale()) throw Error("INPUT_EPOCH_CHANGED");
+      const bytes = Buffer.byteLength(
+        typeof wire === "string" ? wire : JSON.stringify(wire),
+      );
+      if (bytes > maxBytes || (current && !current())) continue;
+      if (!expected && !matches) return { wire };
+      let actual;
+      try {
+        actual = JSON.parse(text);
+      } catch {
+        // Only a structured, complete tool result can prove presentation.
+      }
+      if (!(matches ? matches(actual) : isDeepStrictEqual(expected, actual))) {
+        if (plan.variants.length === 1 && value === original) return { wire };
+        continue;
+      }
+      if (!commit) return { wire };
+      const receipt = randomUUID();
+      let pending = ctx.toolOutputReceipts;
+      if (pending?.epoch !== plan.epoch)
+        pending = ctx.toolOutputReceipts = {
+          epoch: plan.epoch,
+          entries: new Map(),
+        };
+      pending.entries.set(receipt, {
+        digest: createHash("sha256").update(text).digest("hex"),
+        scope: plan.scope,
+        commit,
+      });
+      return { wire, receipt };
+    }
+
+    throw Error("TOOL_OUTPUT_INCOMPLETE");
+  }
+  commitToolOutput(ctx, receipt, observedText) {
+    if (!receipt || typeof observedText !== "string") return false;
+    return this.commitToolOutputDigest(
+      ctx,
+      receipt,
+      createHash("sha256").update(observedText).digest("hex"),
+    );
+  }
+  commitToolOutputDigest(ctx, receipt, digest) {
+    const pending = ctx.toolOutputReceipts;
+    const entry = pending?.entries.get(receipt);
+    if (!entry) return false;
+    pending.entries.delete(receipt);
+    try {
+      if (
+        entry.digest !== digest ||
+        !this.activeOutputEpoch(ctx, pending.epoch, entry.scope)
+      )
+        return false;
+      return entry.commit() !== false;
+    } catch (error) {
+      this.contexts.resetInputEvidence(ctx);
+      delete ctx.stagedOpening;
+      this.diagnostics.report(
+        Error("INPUT_PRESENTATION_COMMIT_FAILED", { cause: error }),
+        {
+          component: "runtime",
+          agentId: ctx.agentId,
+          conversation: ctx.conversation,
+        },
+      );
+      return false;
+    }
+  }
+  async directToolOutput(ctx, result) {
+    if (!ctx.stagedToolOutputs?.has(result)) return result;
+    const { wire, receipt } = await this.finalizeToolOutput(ctx, result, {
+      encode: (value) => {
+        const text = JSON.stringify(
+          value instanceof Error ? safeToolFailure(value) : value,
+        );
+        return { wire: text, text };
+      },
+    });
+    if (receipt) this.commitToolOutput(ctx, receipt, wire);
+    const output = JSON.parse(wire);
+    if (!(result instanceof Error)) return output;
+    result.inputReview = output.inputReview;
+    return result;
+  }
   callTool(...args) {
     return this.trackWork(this.runTool(...args));
   }
   // Records name, outcome and duration of every call (never arguments or
   // results), so a turn's actual activity can be measured afterwards.
-  async runTool(ctx, name, args = {}) {
+  async runTool(ctx, name, args = {}, { deferInput = false } = {}) {
+    const epoch = ctx.inputEpoch;
     const startedAt = Date.now(),
       calls = (ctx.toolCalls ||= []);
     const tracedSend =
@@ -974,16 +1121,22 @@ export class Runtime {
         ctx.subjectToolReservations = (ctx.subjectToolReservations || 0) + 1;
       }
       const result = await this.executeTool(ctx, name, args);
-      if (tracedSend && result?.status === "stopped") {
+      if (ctx.inputEpoch !== epoch) {
+        ctx.stagedToolOutputs?.delete(result);
+        throw Error("INPUT_EPOCH_CHANGED");
+      }
+      if (tracedSend && (result?.status === "stopped" || result?.preparation)) {
         const reason = timedStoppedSend(result, ctx.controller.signal.aborted);
         ctx.messageTimingToolOutcome = reason;
         this.messageTiming.stop(ctx.messageTimingId, reason);
       }
       if (calls.length < 50)
         calls.push({ name, ok: true, ms: Date.now() - startedAt });
-      return result;
+      return deferInput ? result : await this.directToolOutput(ctx, result);
     } catch (error) {
-      attachReviewOriginals(this, ctx, error);
+      if (ctx.inputEpoch !== epoch)
+        throw Error("INPUT_EPOCH_CHANGED", { cause: error });
+      if (!deferInput) await this.directToolOutput(ctx, error);
       if (tracedSend)
         ctx.messageTimingToolOutcome = timedDeliveryFailure(error);
       if (calls.length < 50)
@@ -1015,25 +1168,28 @@ export class Runtime {
       !toolAvailable(a, name, ctx.conversation)
     )
       throw Error("TOOL_DISABLED");
-    const boundary = recallBoundary(this, ctx);
-    for (const id of [
-      args.id,
-      args.eventId,
-      args.recordId,
-      args.aroundId,
-      ...(args.eventIds || []),
-      ...(args.evidence || []),
-      ...(args.evidenceIds || []),
-      ...(args.counterEvidence || []),
-    ].filter((id) => typeof id === "string"))
-      boundary.assertId(id);
-    for (const [id, library] of [
-      [args.fileId, this.files],
-      [args.mediaId, this.media],
-      [args.audioId || args.audioInput?.audioId, this.voices],
-    ])
-      if (id && library) boundary.assert(library.metadata(ctx.agentId, id));
-    let result = await dispatchTool(this, ctx, name, args);
+    let result = await dispatchTool(this, ctx, name, args, (validated) => {
+      const boundary = recallBoundary(this, ctx);
+      for (const id of [
+        validated.id,
+        validated.eventId,
+        validated.recordId,
+        validated.aroundId,
+        ...(validated.eventIds || []),
+        ...(validated.evidence || []),
+        ...(validated.evidenceIds || []),
+        ...(validated.counterEvidence || []),
+      ].filter((id) => typeof id === "string"))
+        boundary.assertId(id);
+      for (const [id, library] of [
+        // Deletion checks the live metadata under the file lock. Its own
+        // tombstone must also be reachable to finish an interrupted delete.
+        [name === "file_delete" ? undefined : validated.fileId, this.files],
+        [validated.mediaId, this.media],
+        [validated.audioId || validated.audioInput?.audioId, this.voices],
+      ])
+        if (id && library) boundary.assert(library.metadata(ctx.agentId, id));
+    });
     if (this.protectedWork.context(ctx) && name !== "protected_work_submit")
       this.protectedWork.record(
         ctx,
@@ -1191,7 +1347,7 @@ export class Runtime {
     return result;
   }
   assertSafeOutput(ctx, text) {
-    if (text.includes(ctx.token) || containsCredential(text))
+    if (this.containsCapability(ctx, text) || containsCredential(text))
       throw Error("SENSITIVE_OUTPUT_BLOCKED");
   }
   send(...args) {

@@ -13,10 +13,21 @@ function configured() {
   return cfg;
 }
 
+function deliveryIds(memory) {
+  return memory.db
+    .prepare(
+      "SELECT request_id FROM deliveries WHERE agent_id=? AND conversation=? ORDER BY request_id",
+    )
+    .all("agent-0", "group:20000")
+    .map(({ request_id }) => request_id);
+}
+
 async function selectedIntentTurn(t, afterBlocked = async () => {}) {
   let f,
     item,
     blocked,
+    blockedDeliveryIds,
+    blockedSendCount,
     retry,
     calls = 0;
   f = fixture(t, {
@@ -41,6 +52,8 @@ async function selectedIntentTurn(t, afterBlocked = async () => {}) {
       } catch (error) {
         blocked = safeToolFailure(error);
       }
+      blockedDeliveryIds = deliveryIds(f.store.bind("agent-0"));
+      blockedSendCount = f.runtime.transports.get("qq-0").sent.length;
       await afterBlocked(f, item);
       try {
         retry = await p.callTool("qq_send", {
@@ -71,7 +84,7 @@ async function selectedIntentTurn(t, afterBlocked = async () => {}) {
   await f.runtime.wake("agent-0", "group:20000", {
     reasons: [{ reason: "intent", intentId: item.id }],
   });
-  return { f, item, blocked, retry };
+  return { f, item, blocked, blockedDeliveryIds, blockedSendCount, retry };
 }
 
 function assertCheckpointRejection(blocked) {
@@ -82,13 +95,20 @@ function assertCheckpointRejection(blocked) {
 }
 
 test("selected intent retries once with the same requestId and leaves the read watermark unchanged", async (t) => {
-  const { f, item, blocked, retry } = await selectedIntentTurn(t);
+  const { f, item, blocked, blockedDeliveryIds, blockedSendCount, retry } =
+    await selectedIntentTurn(t);
   const memory = f.store.bind("agent-0");
   assertCheckpointRejection(blocked);
+  assert.deepEqual(blockedDeliveryIds, []);
+  assert.equal(blockedSendCount, 0);
   assert.equal(retry.status, "sent", JSON.stringify(retry));
   assert.equal(f.runtime.transports.get("qq-0").sent.length, 1);
   assert.equal(memory.delivery("intent:" + item.id).status, "sent");
-  assert.equal(memory.delivery(requestId), undefined);
+  const deliveryId = retry.requestId;
+  assert.equal(typeof deliveryId, "string");
+  assert.equal(retry.draft.items[0].requestId, deliveryId);
+  assert.equal(memory.delivery(deliveryId).status, "sent");
+  assert.deepEqual(deliveryIds(memory), [deliveryId]);
   assert.equal(memory.state("group:20000").readThroughSeq || 0, 0);
   assert.deepEqual(
     memory.state("group:20000").readCheckpointReceipts || {},
@@ -147,12 +167,15 @@ const staleCases = [
 
 for (const [name, change, expected] of staleCases) {
   test("same-requestId retry rechecks " + name, async (t) => {
-    const { f, item, blocked, retry } = await selectedIntentTurn(t, change);
+    const { f, item, blocked, blockedDeliveryIds, blockedSendCount, retry } =
+      await selectedIntentTurn(t, change);
     const memory = f.store.bind("agent-0");
     assertCheckpointRejection(blocked);
+    assert.deepEqual(blockedDeliveryIds, []);
+    assert.equal(blockedSendCount, 0);
     assert.equal(retry.code, expected, JSON.stringify(retry));
     assert.equal(memory.delivery("intent:" + item.id), undefined);
-    assert.equal(memory.delivery(requestId), undefined);
+    assert.deepEqual(deliveryIds(memory), []);
     assert.equal(f.runtime.transports.get("qq-0").sent.length, 0);
     assert.equal(memory.state("group:20000").readThroughSeq || 0, 0);
     assert.equal(memory.state("@subject").contacts?.length || 0, 0);

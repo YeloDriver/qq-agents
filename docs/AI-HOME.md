@@ -104,15 +104,15 @@ CHROME_PATH="<浏览器可执行文件绝对路径>" node test/home-book.browser
 
 ## 独立小窝提议通道
 
-`home.intents.enabled` 默认关闭，开启后自己的会话可用 `room_intent_submit` 向自己的 `@subject` 主人格递交一项参数化家具调整或原创文字提议。目标角色和来源会话由运行时绑定，不接受参数指定；家具提议不能带自由正文，聊天来源可提出这种安全建议，受保护工作、运维、私有仓库和受限来源仍拒绝。文字继续遵守完整来源与安全输出限制，不能借提议转述私人聊天。
+`home.intents.enabled` 默认关闭。启用后自己的会话可用 `subject_inbox_submit`（需启用统一会话提议）或 `room_intent_submit` 向自己的 `@subject` 主人格递交一项参数化家具调整或原创文字提议。目标角色和来源会话由运行时绑定，不接受参数指定；家具提议不能带自由正文，聊天来源可提出这种安全建议，受保护工作、运维、私有仓库和受限来源仍拒绝。文字继续遵守完整来源与安全输出限制，不能借提议转述私人聊天。
 
-先 `room_read` 读取身份代次，再提交唯一 requestId 和 proposal（`kind: room_scene_patch` 与 operations，或 `kind: room_publish` 与 slot/title/body/source）。同一 requestId 和参数只产生一项提议，参数变化拒绝。`room_intent_list` 默认返回最多 100 项，待处理优先；支持 intentId 查询历史。主人格读取实际返回的条目才更新 lastViewedAt，来源聊天只看自己提交的最少元数据，不返正文；读取提示不算已读。回执明确返回 resolvedAt（最近接受或终态处理时间）、executedAt（原子操作提交时间）及最近失败的 lastAttemptAt/lastAttemptError；失败只保存固定安全码，状态仍为 accepted，重读当前版本后可重试。到期的 resolvedAt 为 expiresAt，表示生效时限，而非后来扫到的时间。
+先 `room_read` 读取身份代次，再提交唯一 requestId 和 proposal（小窝提议沿用配置的有效期）（`kind: room_scene_patch` 与 operations，或 `kind: room_publish` 与 slot/title/body/source）。同一 requestId 和参数只产生一项提议，参数变化拒绝。`room_intent_list` 默认返回最多 100 项，待处理优先；支持 intentId 查询历史。主人格读取实际返回的条目才更新 lastViewedAt，来源聊天只看自己提交的最少元数据，不返正文；读取提示不算已读。回执明确返回 resolvedAt（最近接受或终态处理时间）、executedAt（原子操作提交时间）及最近失败的 lastAttemptAt/lastAttemptError；失败只保存固定安全码，状态仍为 accepted，重读当前版本后可重试。到期的 resolvedAt 为 expiresAt，表示生效时限，而非后来扫到的时间。
 
-主人格用 `room_intent_resolve` 的 accept 接受、reject 拒绝；accept 不执行。执行前先读当前房间/布局，再传 action=execute 与相应 expectedItemRevision 或 expectedLayoutRevision。一项提议只对应一项原子操作，服务端用保留的 `intent_` 请求前缀建立关联，关联、实际写入与回执同事务提交。失败回滚不占写入额度；成功重试只返回历史结果，不修改执行时间或再执行，历史成功也不代表当前仍展示。原有 room_operation_status 仍可核对关联 requestId。
+主人格可用统一的 `subject_inbox_decide` 接受、延后、拒绝或执行，也可用原有 `room_intent_resolve`。接受和执行分开，阅读具体内容仍用 `room_intent_list`。执行前先读当前房间/布局，再传 action=execute 与相应 expectedItemRevision 或 expectedLayoutRevision。一项提议只对应一项原子操作，服务端用保留的 `intent_` 请求前缀建立关联，关联、实际写入与回执同事务提交。失败回滚不占写入额度；成功重试只返回历史结果，不修改执行时间或再执行，历史成功也不代表当前仍展示。原有 room_operation_status 仍可核对关联 requestId。
 
 来源会话或主人格可用 `room_intent_cancel` 取消 pending/accepted 项。到期、取消或撤权先于提交时拒绝写入；提交先完成则保留 executed 成功，取消不自动反向撤回。执行、拒绝、取消和过期清除不再需要的提议正文，保留摘要、来源绑定、时限和幂等回执；历史元数据暂不自动清理。完整 SQLite 备份覆盖新表，单角色导出不包含空间表，回滚使用升级前备份。
 
-提议默认有效 7 天、最多 20 项待处理、每日 UTC 最多提交 20 次；接受后的项目也占待处理额度。`home.intents.hints` 默认 true，但仅通道开启时在已运行且来源允许的主体上下文提供真实待处理数量、布局版本和当前可见已发布槽位数。它不唤醒主体、不推进已读，也不发 QQ。旧实例已有小窝能力保留，新增意图能力不会自动启用。
+提议默认有效 7 天、最多 20 项待处理、每日 UTC 最多提交 20 次；接受后的项目也占待处理额度。`home.intents.hints` 默认 true，但仅通道开启时在已运行且来源允许的主体上下文提供真实待处理数量、布局版本和当前可见已发布槽位数。提示本身只提供数量；角色启用 `subject.inboxEnabled` 后，普通聊天提交的小窝提议会进入统一收件箱并及时安排主人格查看。来源会话的下一次正常开场会收到状态回执。
 
 ## 二期私密社交来源边界
 
@@ -138,6 +138,8 @@ CHROME_PATH="<浏览器可执行文件绝对路径>" node test/home-book.browser
 
 ## 往来管理与社交设置
 
+实例和角色均开启社交后，已有的主人格空闲回合会提示如何发起串门、处理邀请和继续拜访。角色可用 `home_social_process` 排队独立回合，在其中决定是否提交邀请或回应。管理员开启功能只授予使用资格，发起和接受仍由双方各自决定。
+
 每个房间的墙上都有一封信，点击信封或页脚的文字入口打开「房间信件」。一次拜访对应一封信，按最新拜访优先排列，只收录以该房间主人为房主的拜访；该角色到别处做客的记录在管理台「访问」查看。选择信件后展开信纸，按顺序展示对话作者、时间和正文，长对话可继续翻阅。空房间显示尚无信件，不生成示例记录。
 
 管理台角色菜单分为「记忆」「日记」「访问」：「访问」包含该角色做主人和做客的拜访，同样以信件阅读。房间信件使用 `GET /api/home-social/overview?roomOwnerAgentId=<id>&kind=visit`，角色访问使用 `agentId=<id>&kind=visit`；游标绑定筛选条件。两处都复用独立私密接口，概览不含对话正文，展开信纸才请求正文并记录管理员访问审计。浏览不代表角色已看过邀请或消息，也不触发模型，不把私密对话复制到普通记忆或日记。
@@ -148,4 +150,4 @@ CHROME_PATH="<浏览器可执行文件绝对路径>" node test/home-book.browser
 
 「实例社交设置」可读取当前配置并编辑时长、TTL、额度和保留期限。默认按回合运行：双方合计 12 回合，一方执行一次计 1 回合，回合内工具续推理不另计回合。同一时段内每位角色续用自己的社交会话，正常接续只追加新消息，时段结束后不再续用。不设 token 硬上限，仍遵守时段期限、消息额度、暂停和撤权检查。可选 token 硬预算继续保留；选择后需填写每次输入、输出、每回合、每时段、每日及推理次数上限，日预算按 UTC 重置。角色参与开关与房间展示分别保存，已有角色不会自动加入。
 
-DSH、Codex、Antigravity 可沿用角色现有后端，在独立社交会话中按回合运行，无需选择社交 profile；DSH 须使用 `qq-unified` preset，其他 preset 不支持社交运行。可选硬预算仍仅支持经验证的精确 OpenAI profile，在后端编辑页显式选择。保存不会替换现有模型、地址或凭据。设置保存有版本冲突保护，错误时保留草稿；已配置的 token 硬预算保持生效，无可信用量的后端不把零值展示成实测。代码更新不会自动启用实例或角色社交，也不扩大既有受众。
+DSH、Codex、Antigravity 可沿用角色现有后端，在独立社交会话中按回合运行，无需选择社交 profile；DSH 须使用 `qq-unified` preset，其他 preset 不支持社交运行。可选硬预算仍仅支持经验证的精确 OpenAI profile，在后端编辑页显式选择。保存不会替换现有模型、地址或凭据。后端显示名称等展示设置不会撤销已同意的交流。涉及具体参与者的权限或会话契约变化只关闭相关交流。设置保存有版本冲突保护，错误时保留草稿；已配置的 token 硬预算保持生效，无可信用量的后端不把零值展示成实测。代码更新不会自动启用实例或角色社交，也不扩大既有受众。

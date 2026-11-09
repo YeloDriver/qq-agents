@@ -4,9 +4,10 @@ import {
   HOME_TOOLS,
 } from "../home/policy.mjs";
 import { SOCIAL_TOOLS } from "../home/social-tool-names.mjs";
+import { subjectInboxEnabled } from "../core/role-rest.mjs";
 import { z } from "zod";
 import { toolSpecs } from "./specs.mjs";
-import { canUseDraftTool } from "./qq-drafts.mjs";
+import { canUseDraftTool } from "../core/draft-input.mjs";
 import { profileConversation } from "../core/profile.mjs";
 
 export const discoveryInput = z
@@ -73,6 +74,22 @@ export function scopedCatalog(runtime, ctx, input) {
 }
 
 export function toolAvailable(agent, name, conversation) {
+  if (name.startsWith("subject_inbox_") || name === "subject_rest")
+    return (
+      subjectInboxEnabled(agent) &&
+      (name === "subject_inbox_submit"
+        ? /^(group|private):\d+$/.test(conversation)
+        : name === "subject_inbox_list"
+          ? conversation === "@subject" ||
+            /^(group|private):\d+$/.test(conversation)
+          : conversation === "@subject")
+    );
+  if (name === "file_delete")
+    return (
+      agent.files?.enabled === true &&
+      agent.files.delete === true &&
+      profileConversation(agent, conversation)
+    );
   if (name === "qq_draft")
     return (
       /^(private|group):\d+$/.test(conversation) &&

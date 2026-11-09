@@ -1,9 +1,18 @@
 import { assertHomeSceneMedia } from "../home/scene-media.mjs";
 import { assertNoSocialDisclosure } from "./social-protection.mjs";
 import { peerQzoneSources } from "./peer-qzone-protection.mjs";
-import { assertInputReviewed } from "./input-review.mjs";
+import {
+  assertDraftReview,
+  DraftReviewInterrupted,
+  assertInputReviewed,
+} from "./input-review.mjs";
 import { timedDeliveryFailure } from "./message-timing-runtime.mjs";
-import { draftScope, recoverDraftArchives } from "./draft-delivery.mjs";
+import {
+  applyDeliveryCheckpoint,
+  bindSubmission,
+  draftScope,
+  recoverDraftArchives,
+} from "./draft-delivery.mjs";
 import { recallBoundary } from "./recall-boundary.mjs";
 import { containsCredential } from "./secrets.mjs";
 import { beforeShareDelivery } from "../apps/sharing.mjs";
@@ -64,7 +73,7 @@ export class DeliveryService {
       mediaId,
       inputReview,
     },
-    { archiveBody, reviewIntent, reviewOptions, onReserve, replyEventId } = {},
+    { archiveBody, submission, replyEventId } = {},
   ) {
     const runtime = this.runtime;
     const a = runtime.assertActive(ctx),
@@ -140,9 +149,7 @@ export class DeliveryService {
       intent: segments,
       body: archiveBody ?? message.body,
       inputReview,
-      reviewIntent,
-      reviewOptions,
-      onReserve,
+      submission,
       metadata: {
         replyTo,
         requestedReplyTo,
@@ -215,7 +222,9 @@ export class DeliveryService {
       capture?.finishDelivery(
         timingId,
         timingIndex,
-        timedDeliveryFailure(error),
+        error instanceof DraftReviewInterrupted
+          ? "review-required"
+          : timedDeliveryFailure(error),
       );
       throw error;
     } finally {
@@ -237,13 +246,20 @@ export class DeliveryService {
       ["official-collect", "official-remark"].includes(operation.intent?.kind)
     )
       return undefined;
+    const execution = operation.submission?.execution;
+    if (execution)
+      return assertDraftReview(
+        this.runtime,
+        ctx,
+        execution.binding,
+        execution.grant,
+      );
     return assertInputReviewed(
       this.runtime,
       ctx,
       checked.requestId,
       operation.reviewIntent ?? operation.intent,
       operation.inputReview,
-      operation.reviewOptions,
     );
   }
   async enqueue(ctx, operation) {
@@ -353,7 +369,7 @@ export class DeliveryService {
     runtime.assertDisclosure(ctx);
     beforeShareDelivery(appService(runtime), ctx, metadata);
     const serialized = JSON.stringify(intent);
-    if (serialized.includes(ctx.token) || containsCredential(body))
+    if (runtime.containsCapability(ctx, serialized) || containsCredential(body))
       throw Error("SENSITIVE_OUTPUT_BLOCKED");
     const previous = mem.delivery(requestId);
     if (previous) {
@@ -475,15 +491,19 @@ export class DeliveryService {
       checked,
     );
     const actionKind = action ? actionBudget?.kind || intent?.kind : null;
+    const connectionId = a.connectionId;
+    const connection = runtime.connection(connectionId);
+    const messageNamespace = connection.messageIdNamespace || "onebot";
     const event = {
-      connectionId: a.connectionId,
+      connectionId,
       conversation: ctx.conversation,
-      senderId: runtime.connection(a.connectionId).accountId,
+      senderId: connection.accountId,
       direction: "out",
       body,
       payload: {
         requestId,
         ...metadata,
+        messageNamespace,
         ...(action
           ? { deliveryType: "action", ...(actionKind ? { actionKind } : {}) }
           : {}),
@@ -491,7 +511,8 @@ export class DeliveryService {
         protectedRepositories: privateGithubSources(ctx, runtime),
       },
     };
-    let inputReview;
+    const reservedEpoch = ctx.inputEpoch;
+    let inputReview, submitted;
     mem.store.transaction(() => {
       // Intake writes and reservation share this database. Keep the last input
       // check inside its write transaction, with no await before gateway submission.
@@ -531,15 +552,36 @@ export class DeliveryService {
               }
           : {}),
       });
-      operation.onReserve?.(requestId, inputReview);
+      if (operation.submission)
+        submitted = bindSubmission(
+          runtime,
+          ctx,
+          operation.submission,
+          requestId,
+          inputReview,
+        );
       if (!contactFreeAction) runtime.subject.reserveContact(ctx, proactive);
       mem.append({
         ...event,
         dedupe: "send:" + requestId + ":pending",
         kind: "message.send-attempt",
         status: "pending",
+        payload: {
+          ...event.payload,
+          ...(submitted
+            ? { submission: submitted }
+            : inputReview?.accepted.length
+              ? {
+                  deliveryReview: {
+                    scope: inputReview.scope,
+                    refs: inputReview.accepted,
+                  },
+                }
+              : {}),
+        },
       });
     });
+    if (operation.submission) operation.submission.execution.reserved = true;
     mark?.("reserved");
     if (!actionBudget)
       ctx.replyBatchSends = (ctx.replyBatchSends ?? ctx.sendCount) + 1;
@@ -569,99 +611,107 @@ export class DeliveryService {
       const receipt = await send(transport, operation.prepared);
       if (action ? receipt?.confirmed !== true : receipt?.messageId == null)
         throw Error("DELIVERY_UNCONFIRMED");
-      mark?.("gatewayConfirmed");
       acknowledged = true;
-      // Record confirmed delivery even if the user pauses while its network request is in flight.
-      const messageId =
-        receipt.messageId == null ? null : String(receipt.messageId);
-      const confirmation = {
-        action,
-        messageNamespace:
-          runtime.connection(a.connectionId).messageIdNamespace || "onebot",
-        ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
-      };
-      let draftLinked;
-      const persistConfirmation = () => {
-        mem.completeDelivery(requestId, "sent", messageId);
-        draftLinked = runtime.drafts.recordConfirmation(
-          a.id,
-          requestId,
-          confirmation,
-        );
-      };
-      try {
-        mem.store.transaction(() => {
-          persistConfirmation();
-          if (inputReview) {
-            const current = mem.state(ctx.conversation);
-            if (inputReview.throughSeq > (current.inputReviewThroughSeq || 0))
-              mem.setState(ctx.conversation, {
-                ...current,
-                inputReviewThroughSeq: inputReview.throughSeq,
-              });
-          }
-          if (!contactFreeAction) runtime.subject.delivered(ctx, "sent");
-        });
-      } catch (error) {
-        // Optional review or intent bookkeeping must not erase a received ACK.
-        mem.store.transaction(persistConfirmation);
+      const reportAuditFailure = (error) =>
         runtime.diagnostics.report(
           Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: error }),
           {
             component: "runtime",
             agentId: a.id,
-            conversation: ctx.conversation,
+            conversation: event.conversation,
           },
         );
+      try {
+        mark?.("gatewayConfirmed");
+      } catch (error) {
+        reportAuditFailure(error);
       }
-      mark?.("ledgerConfirmed");
-      capture?.finishDelivery(
-        ctx.messageTimingId,
-        operation.timingIndex,
-        "confirmed",
+      // Record confirmed delivery even if the user pauses while its network request is in flight.
+      const messageId =
+        receipt.messageId == null ? null : String(receipt.messageId);
+      const confirmation = {
+        action,
+        messageNamespace,
+        ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
+      };
+      const draftLinked = mem.confirmDelivery(
+        requestId,
+        messageId,
+        confirmation,
+        runtime.drafts,
       );
-      for (const { id, version } of inputReview?.accepted || [])
-        (ctx.confirmedReviewInput ??= new Map()).set(id, version);
+      let reviewed = [],
+        reviewRecorded = true;
+      try {
+        reviewed = mem.projectConfirmedDeliveryReview(requestId);
+      } catch (error) {
+        reviewRecorded = false;
+        reportAuditFailure(error);
+      }
+      if (!contactFreeAction) {
+        try {
+          mem.store.transaction(() => runtime.subject.delivered(ctx, "sent"));
+        } catch (error) {
+          reportAuditFailure(error);
+        }
+      }
+      const readCheckpoint = applyDeliveryCheckpoint(
+        runtime,
+        ctx,
+        submitted?.checkpoint,
+        operation.submission?.execution.epoch,
+      );
+      try {
+        mark?.("ledgerConfirmed");
+        capture?.finishDelivery(
+          ctx.messageTimingId,
+          operation.timingIndex,
+          "confirmed",
+        );
+      } catch (error) {
+        reportAuditFailure(error);
+      }
+      if (ctx.inputEpoch === reservedEpoch)
+        for (const { id, version } of reviewed)
+          (ctx.confirmedReviewInput ??= new Map()).set(id, version);
       if (!actionBudget) {
         ctx.confirmedSends = (ctx.confirmedSends || 0) + 1;
-        runtime.conversations.sent(ctx);
+        try {
+          runtime.conversations.sent(ctx);
+        } catch (error) {
+          reportAuditFailure(error);
+        }
       }
       let record;
-      if (draftLinked) {
-        try {
+      try {
+        if (draftLinked) {
           record = recoverDraftArchives(
             runtime.memory,
             runtime.drafts,
             a.id,
             requestId,
           );
-        } catch (error) {
-          runtime.diagnostics.report(
-            Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: error }),
-            {
-              component: "runtime",
-              agentId: a.id,
-              conversation: ctx.conversation,
+        } else
+          record = mem.append({
+            ...event,
+            dedupe: "send:" + requestId + ":sent",
+            messageId,
+            payload: {
+              ...event.payload,
+              messageNamespace,
+              ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
             },
-          );
-        }
-      } else
-        record = mem.append({
-          ...event,
-          dedupe: "send:" + requestId + ":sent",
-          messageId,
-          payload: {
-            ...event.payload,
-            messageNamespace:
-              runtime.connection(a.connectionId).messageIdNamespace || "onebot",
-            ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
-          },
-          kind: action ? "action.confirmed" : "message.sent",
-          status: "confirmed",
-        });
+            kind: action ? "action.confirmed" : "message.sent",
+            status: "confirmed",
+          });
+      } catch (error) {
+        reportAuditFailure(error);
+      }
       return {
         status: "sent",
         messageId,
+        ...(reviewRecorded ? {} : { reviewRecorded: false }),
+        ...(submitted ? { requestId } : {}),
         // The archived record, which mind tools accept as evidence.
         ...(record?.id
           ? { recordId: record.id }
@@ -669,6 +719,7 @@ export class DeliveryService {
             ? { archivePending: true }
             : {}),
         ...(action ? { actionConfirmed: true } : {}),
+        ...(readCheckpoint ? { readCheckpoint } : {}),
         ...(receipt.fileId ? { gatewayFileId: receipt.fileId } : {}),
       };
     } catch (e) {

@@ -1,6 +1,14 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixture, config, raw, listenForFetch } from "./helpers.mjs";
+import {
+  fixture,
+  config,
+  raw,
+  listenForFetch,
+  relayEnvironment,
+} from "./helpers.mjs";
 import { createServer } from "../src/server.mjs";
 import { Runtime } from "../src/core/runtime.mjs";
 import { waitForDrain } from "../src/updates/drain.mjs";
@@ -136,7 +144,28 @@ test("draining admits existing HTTP tools and receipts, queues new input, and bl
   const app = createServer({ runtime: f.runtime, token: "synthetic-admin" });
   const port = await listenForFetch(app);
   t.after(() => app.close());
+  const relay = new Client({ name: "synthetic-drain", version: "1" });
+  await relay.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: ["src/mcp.mjs"],
+      env: {
+        QQ_UNIFIED_URL: `http://127.0.0.1:${port}`,
+        ...relayEnvironment(f.root, "synthetic-admin"),
+      },
+      stderr: "pipe",
+    }),
+  );
+  t.after(() => relay.close());
   const request = async (route, body, capability) => {
+    if (route === "/agent/tools")
+      return {
+        status: 200,
+        data: await relay.callTool({
+          name: "bridge_call",
+          arguments: { context: capability, ...body },
+        }),
+      };
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {
       method: "POST",
       headers: capability
@@ -193,13 +222,13 @@ test("draining admits existing HTTP tools and receipts, queues new input, and bl
     const draft = { requestId: "drained-delivery", text: "synthetic" };
     const blocked = await call("qq_send", draft);
     const challenge = JSON.parse(blocked.data.content[0].text);
-    assert.equal(challenge.code, "INPUT_REVIEW_REQUIRED");
-    assert(challenge.inputReview.token);
+    assert.equal(challenge.actionResult, "not_sent");
+    assert(challenge.preparation.token);
     const tool = call("qq_draft", {
       action: "continue",
       draftId: challenge.draft.draftId,
       expectedVersion: challenge.draft.version,
-      inputReview: { token: challenge.inputReview.token, decision: "continue" },
+      inputReview: { token: challenge.preparation.token, decision: "continue" },
     });
     await Promise.race([
       sending.promise,
@@ -209,9 +238,13 @@ test("draining admits existing HTTP tools and receipts, queues new input, and bl
     ]);
     assert.ok(f.runtime.maintenance.snapshot().pending >= 2);
     receipt.resolve();
-    assert.equal((await tool).data.isError, undefined);
+    const completed = (await tool).data;
+    assert.equal(completed.isError, undefined);
+    const sent = JSON.parse(completed.content[0].text);
+    assert.equal(sent.status, "sent");
+    assert(sent.requestId);
     assert.equal(
-      f.store.bind("agent-0").delivery("drained-delivery").status,
+      f.store.bind("agent-0").delivery(sent.requestId).status,
       "sent",
     );
   } finally {

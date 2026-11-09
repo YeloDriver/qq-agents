@@ -99,6 +99,7 @@ const AGENT_TOOL_GROUPS = [
       file_download: "下载文件",
       file_create: "生成文本文件",
       file_revise: "修订文本稿（保留旧版）",
+      file_delete: "删除自己生成的文件",
       file_import: "从指定目录导入",
       qq_send_file: "发送文件",
     },
@@ -181,6 +182,19 @@ const AGENT_TOOL_GROUPS = [
       intent_update: "暂缓或取消意图",
       subject_log: "记录空闲时间（主体自动可用）",
       intent_decide: "决定是否执行意图",
+    },
+  },
+  {
+    id: "subject-inbox",
+    builtin: true,
+    builtinLabel: "在「空闲时间」页开关",
+    title: "会话提议与自主休息",
+    desc: "普通会话递交提议，主人格决定是否休息、联系或接力。",
+    tools: {
+      subject_inbox_submit: "递交会话提议",
+      subject_inbox_list: "查看会话提议",
+      subject_inbox_decide: "处理会话提议",
+      subject_rest: "自主休息",
     },
   },
   {
@@ -1031,6 +1045,7 @@ const agentForm = {
     // (Runtime.toolsFor).
     if (enabled.has("file_list")) enabled.add("file_read");
     if (enabled.has("file_create")) enabled.add("file_revise");
+    if (!row.files?.enabled || !row.files.delete) enabled.delete("file_delete");
     const known = new Set(
       AGENT_TOOL_GROUPS.flatMap((g) => Object.keys(g.tools)),
     );

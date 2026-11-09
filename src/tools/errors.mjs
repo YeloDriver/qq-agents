@@ -4,25 +4,114 @@ import { InputReviewRequired } from "../core/input-review.mjs";
 
 const draftFailures = new WeakMap();
 
-/** @param {object} error @param {object} draft */
-export function attachDraftFailure(error, draft) {
-  draftFailures.set(error, draft);
+/** @param {object} error @param {object|undefined} draft @param {object[]} [draftRefs] */
+export function attachDraftFailure(error, draft, draftRefs) {
+  draftFailures.set(error, { draft, draftRefs });
 }
 
 // Report actionable validation bounds without echoing input values, paths,
 // stack traces, provider errors or credentials into either model backend.
 /** @param {any} error */
 export function safeToolFailure(error) {
-  const draft = draftFailures.get(error);
   const failure = safeFailure(error);
-  if (!draft) return failure;
+  const details = draftFailures.get(error);
+  if (!details) return failure;
+  const { draft, draftRefs } = details;
   const hint =
     error instanceof ToneReviewSuggested
-      ? "Review the wording. Use qq_draft revise to edit an unsent item or qq_draft continue with its current version to confirm it."
-      : error instanceof InputReviewRequired
-        ? "Read the current input and decide whether to revise, discard, or continue this exact draft version with the review token. Earlier receipts remain final."
-        : failure.hint;
-  return { ...failure, hint, draft };
+      ? "Review the wording. Use qq_draft revise to edit an unsent item or prepare its current version before deciding whether to continue."
+      : failure.hint;
+  return {
+    ...failure,
+    hint,
+    ...(draft ? { draft } : {}),
+    ...(draftRefs ? { draftRefs } : {}),
+  };
+}
+
+const validationCodes = new Set([
+  "too_big",
+  "too_small",
+  "invalid_type",
+  "invalid_value",
+  "invalid_format",
+  "invalid_union",
+  "unrecognized_keys",
+  "not_multiple_of",
+  "invalid_key",
+  "invalid_element",
+  "custom",
+]);
+const validationTypes = new Set([
+  "string",
+  "number",
+  "int",
+  "boolean",
+  "object",
+  "array",
+  "null",
+  "undefined",
+  "bigint",
+  "date",
+  "map",
+  "set",
+  "file",
+  "nan",
+]);
+const validationFormats = new Set([
+  "regex",
+  "email",
+  "url",
+  "uuid",
+  "datetime",
+  "date",
+  "time",
+  "ipv4",
+  "ipv6",
+  "base64",
+  "base64url",
+  "starts_with",
+  "ends_with",
+  "includes",
+]);
+
+/** @param {any[]} issues */
+function validationIssues(issues) {
+  /** @type {Record<string, unknown>[]} */
+  const projected = [];
+  /** @param {any} issue @param {string} parent */
+  function append(issue, parent) {
+    if (projected.length === 8) return;
+    let field = parent;
+    for (const part of (issue.path || []).slice(0, 8)) {
+      if (Number.isSafeInteger(part) && part >= 0) field += `[${part}]`;
+      else if (
+        typeof part === "string" &&
+        /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(part)
+      )
+        field += (field ? "." : "") + part;
+      else break;
+    }
+    const safe = {
+      field: field || "$",
+      code: validationCodes.has(issue.code) ? issue.code : "invalid_argument",
+      ...(validationTypes.has(issue.expected)
+        ? { expected: issue.expected }
+        : {}),
+      ...(validationFormats.has(issue.format) ? { format: issue.format } : {}),
+      ...(Number.isFinite(issue.minimum) ? { minimum: issue.minimum } : {}),
+      ...(Number.isFinite(issue.maximum) ? { maximum: issue.maximum } : {}),
+    };
+    if (
+      !projected.some((entry) => JSON.stringify(entry) === JSON.stringify(safe))
+    )
+      projected.push(safe);
+    if (issue.code === "invalid_union")
+      for (const branch of issue.errors || [])
+        for (const child of branch) append(child, field);
+  }
+  for (const issue of issues) append(issue, "");
+  return projected;
 }
 
 /** @param {any} error */
@@ -73,26 +162,7 @@ function safeFailure(error) {
   if (error?.name === "ZodError" && Array.isArray(error.issues))
     return {
       code: "INVALID_TOOL_ARGUMENTS",
-      issues: error.issues.slice(0, 8).map((/** @type {any} */ issue) => ({
-        field: (issue.path || [])
-          .filter(
-            (/** @type {unknown} */ p) =>
-              typeof p === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(p),
-          )
-          .slice(0, 4)
-          .join("."),
-        code: [
-          "too_big",
-          "too_small",
-          "invalid_type",
-          "invalid_value",
-          "unrecognized_keys",
-        ].includes(issue.code)
-          ? issue.code
-          : "invalid_argument",
-        ...(Number.isFinite(issue.minimum) ? { minimum: issue.minimum } : {}),
-        ...(Number.isFinite(issue.maximum) ? { maximum: issue.maximum } : {}),
-      })),
+      issues: validationIssues(error.issues),
       hint: "Correct the named arguments within these bounds, or omit optional budgets and use pagination. The operation did not succeed. Do not infer unread content or claim successful delivery.",
     };
   /** @type {Record<string, string>} */
@@ -121,10 +191,16 @@ function safeFailure(error) {
       "The gateway does not support this reaction action. No reaction was confirmed. Do not retry another message, face or requestId to work around missing gateway support.",
     INVALID_MEMORY_SCOPE:
       "The source selector is invalid, not an empty memory result. memory_search conversationType=group/private filters a kind of chat. conversation must be an exact source key such as group:20000 or private:30000; do not use group/private or wildcard keys. Omit conversation to search your own memories across chats, then use the returned source key. conversation_read without conversation only reads the current chat. Keep protected-source restrictions unchanged.",
+    DRAFT_EXECUTING:
+      "This draft has an active submission. Check its progress before editing or discarding it.",
+    DRAFT_LIMIT_REACHED:
+      "The chat has reached its open draft limit. Review the visible drafts or discard an unsubmitted draft before creating another.",
+    QQ_DRAFT_SUPERSEDED:
+      "This creation request refers to an older version of the draft. Read the current draft for the revised content and exact receipts.",
     QQ_DRAFT_DELIVERY_UNRESOLVED:
       "A prior delivery in this chat is pending or unknown. Check qq_delivery_status; only a verified receipt or an administrator's explicit verdict settles it. Do not try another request ID, wording, or send tool.",
     QQ_DRAFT_CONTINUE_REQUIRED:
-      "Use qq_draft to read, revise, discard, or explicitly continue the saved version. Repeating the original send call only returns the existing status.",
+      "Use qq_draft to read, revise, prepare, or discard the saved version. Continue requires the token from a ready preparation. Repeating the original send call only returns the existing status.",
     DELIVERY_UNKNOWN:
       "The gateway could not confirm whether this message reached QQ (for example QQ dropped offline mid-send); it may already be visible. Do not send it again or change requestId. The program marks it sent when QQ's own copy arrives, otherwise the administrator checks it in the console.",
     MOOD_CHANGE_NEEDS_CAUSE:

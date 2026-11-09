@@ -8,7 +8,13 @@ import {
 import { withInteraction } from "../core/closeness.mjs";
 import { recallMessage } from "../core/message-recall.mjs";
 import { deliveryPage } from "../core/chat-context.mjs";
-import { recordReviewPresentation } from "../core/input-review.mjs";
+import { rememberSources } from "../core/context-handoff.mjs";
+import {
+  assertReadCheckpoint,
+  inlineChatInputChars,
+  presentationVersion,
+  processInput,
+} from "../core/input-review.mjs";
 import { sendDraftTool } from "./qq-drafts.mjs";
 import { githubMarker, privateGithubSources } from "../github/policy.mjs";
 import { readEventImage } from "./image-read.mjs";
@@ -101,13 +107,21 @@ async function handle_memory_read(runtime, ctx, args, name) {
   const item = mem.readRecord(args, ctx.conversation);
   recallBoundary(runtime, ctx).assert(item);
   let version;
-  const r = mem.read(args, ctx.conversation, {
-    item,
-    captureVersion: (value) => {
-      version = value;
+  const r = mem.read(
+    { ...args, maxChars: inlineChatInputChars(runtime, ctx, args.maxChars) },
+    ctx.conversation,
+    {
+      item,
+      captureVersion: (value) => {
+        version = value;
+      },
     },
-  });
+  );
   track(ctx, [r]);
+  const stage = (result, commit) => {
+    runtime.stageToolInput(ctx, result, commit, [item]);
+    return result;
+  };
   const pages = (ctx.inputPages ??= new Map());
   const old = pages.get(r.id);
   const continues =
@@ -115,24 +129,48 @@ async function handle_memory_read(runtime, ctx, args, name) {
   if (!continues) {
     if (old && old.version !== version) {
       pages.delete(r.id);
-      return {
+      return stage({
         ...r,
         presentationRestart: { tool: "memory_read", id: r.id, offset: 0 },
-      };
+      });
     }
-    return r;
+    return stage(r);
   }
-  pages.delete(r.id);
   if (r.nextOffset === null) {
-    runtime.observeInput(ctx, [item]);
-    recordReviewPresentation(runtime, ctx, [item]);
+    if (
+      item.conversation === ctx.conversation &&
+      Number.isSafeInteger(item.seq)
+    ) {
+      const staged = runtime.contexts.stageSeen(ctx, [item]);
+      const inputRefs = [...staged.proofs].map(([id, version]) => ({
+        id,
+        version,
+      }));
+      const result = {
+        ...r,
+        ...staged.checkpoint,
+        ...(inputRefs.length ? { inputRefs } : {}),
+      };
+      return stage(result, () => {
+        pages.delete(r.id);
+        runtime.contexts.commitSeen(ctx, staged);
+      });
+    }
   } else {
-    // Keep offsets and digests only. Archive projections can exceed the size
-    // of their source messages when payloads carry both raw and decoded forms.
-    if (pages.size === 10) pages.delete(pages.keys().next().value);
-    pages.set(r.id, { version, offset: r.nextOffset });
+    const inputVersion =
+      item.conversation === ctx.conversation &&
+      /^(group|private):/.test(ctx.conversation)
+        ? presentationVersion(runtime, ctx, r.id)
+        : undefined;
+    return stage(r, () => {
+      const delivered = pages.get(r.id);
+      if (delivered?.version === version && delivered.offset > r.offset) return;
+      pages.delete(r.id);
+      if (pages.size === 10) pages.delete(pages.keys().next().value);
+      pages.set(r.id, { version, inputVersion, offset: r.nextOffset });
+    });
   }
-  return r;
+  return stage(r);
 }
 async function handle_conversation_read(runtime, ctx, args, name) {
   const mem = runtime.memory.bind(ctx.agentId);
@@ -145,14 +183,36 @@ async function handle_conversation_read(runtime, ctx, args, name) {
     runtime,
     ctx,
     mem.conversation(
-      { conversation: ctx.conversation, ...args },
+      {
+        conversation: ctx.conversation,
+        ...args,
+        maxChars: inlineChatInputChars(runtime, ctx, args.maxChars),
+      },
       ctx.conversation,
     ),
   );
   track(ctx, r.items);
-  runtime.contexts.seen(ctx, r.items);
-  recordReviewPresentation(runtime, ctx, r.items);
-  return r;
+  if (!r.markReadEligible) {
+    if (r.items.some((item) => item.conversation === ctx.conversation))
+      rememberSources(mem, ctx.conversation, r.items);
+    runtime.stageToolInput(ctx, r, undefined, r.items);
+    return r;
+  }
+  const staged = runtime.contexts.stageSeen(ctx, r.items);
+  const result = { ...r, ...staged.checkpoint };
+  runtime.stageToolInput(
+    ctx,
+    result,
+    () => {
+      runtime.contexts.commitSeen(ctx, staged);
+      ctx.conversationPageThroughSeq = Math.max(
+        ctx.conversationPageThroughSeq || 0,
+        r.items.at(-1)?.seq || 0,
+      );
+    },
+    r.items,
+  );
+  return result;
 }
 async function handle_diary_write(runtime, ctx, args, name) {
   const mem = runtime.memory.bind(ctx.agentId);
@@ -181,204 +241,67 @@ async function handle_diary_write(runtime, ctx, args, name) {
         socialSources(runtime, ctx),
       );
 }
-function assertReadCheckpoint(ctx, throughSeq) {
-  if (
-    !Number.isSafeInteger(throughSeq) ||
-    throughSeq < 0 ||
-    !Number.isSafeInteger(ctx.shownSeq) ||
-    ctx.shownSeq < 0 ||
-    throughSeq > ctx.shownSeq
-  )
-    throw Error("UNSEEN_WATERMARK");
-}
-function readCheckpointToolEnabled(runtime, ctx) {
-  // Proactive delivery rewrites requestId to its selected intent's ledger key.
-  // Keep this shortcut on ordinary replies so a duplicate intent cannot acquire
-  // a new checkpoint through a different model-supplied requestId.
-  if (ctx.activeIntentId) return false;
-  return (
-    ctx.allowedTools ||
-    runtime.toolsFor(runtime.agent(ctx.agentId), ctx.conversation)
-  ).includes("qq_mark_read");
-}
-function readCheckpointReceipts(mem, conversation) {
-  const receipts = mem.state(conversation).readCheckpointReceipts;
-  if (receipts == null) return {};
-  if (typeof receipts !== "object" || Array.isArray(receipts))
-    throw Error("READ_CHECKPOINT_STATE_INVALID");
-  return receipts;
-}
-function saveReadCheckpointIntent(
-  mem,
-  conversation,
-  requestId,
-  throughSeq,
-  shownSeq,
-) {
-  const state = mem.state(conversation),
-    previous = state.readCheckpointReceipts || {},
-    intent = { throughSeq, shownSeq },
-    entries = [
-      ...Object.entries(previous).filter(([key]) => key !== requestId),
-      [requestId, intent],
-    ];
-  let next = Object.fromEntries(entries);
-  if (entries.length > 100) next = Object.fromEntries(entries.slice(-100));
-  mem.setState(conversation, { ...state, readCheckpointReceipts: next });
-  return intent;
-}
-function saveReadCheckpointReceipt(
-  mem,
-  conversation,
-  requestId,
-  intent,
-  receipt,
-) {
-  const state = mem.state(conversation),
-    previous = state.readCheckpointReceipts || {};
-  if (!Object.hasOwn(previous, requestId)) return false;
-  const saved = previous[requestId];
-  if (
-    saved.throughSeq !== intent.throughSeq ||
-    saved.shownSeq !== intent.shownSeq
-  )
-    return false;
-  if (saved.sentReceipt === true) return true;
-  const next = Object.fromEntries(
-    Object.entries(previous).map(([key, value]) => [
-      key,
-      key === requestId
-        ? {
-            ...value,
-            sentReceipt: true,
-            recordId: receipt.recordId || null,
-          }
-        : value,
-    ]),
-  );
-  mem.setState(conversation, { ...state, readCheckpointReceipts: next });
-  return true;
-}
-function checkpointFromIntent(intent) {
-  if (
-    !intent ||
-    !Number.isSafeInteger(intent.throughSeq) ||
-    intent.throughSeq < 0 ||
-    !Number.isSafeInteger(intent.shownSeq) ||
-    intent.throughSeq > intent.shownSeq
-  )
-    return null;
-  return { throughSeq: intent.throughSeq };
-}
-function persistReadCheckpoint(runtime, ctx, throughSeq) {
-  const mem = runtime.memory.bind(ctx.agentId),
-    state = mem.state(ctx.conversation);
-  state.readThroughSeq = Math.max(state.readThroughSeq || 0, throughSeq);
-  mem.setState(ctx.conversation, state);
-  return { readThroughSeq: state.readThroughSeq };
-}
 async function handle_qq_send(runtime, ctx, args, name) {
-  if (args.readThroughSeq !== undefined) {
-    if (ctx.activeIntentId) throw Error("INTENT_READ_CHECKPOINT_NOT_ALLOWED");
-    if (!readCheckpointToolEnabled(runtime, ctx))
-      throw Error("TOOL_NOT_ALLOWED");
-    assertReadCheckpoint(ctx, args.readThroughSeq);
-  }
+  if (ctx.activeIntentId && args.readThroughSeq !== undefined)
+    throw Error("INTENT_READ_CHECKPOINT_NOT_ALLOWED");
+  const result = await sendDraftTool(runtime, ctx, "qq_send", args);
+  if (result.status !== "sent") return result;
   const mem = runtime.memory.bind(ctx.agentId);
-  const shownSeq = ctx.shownSeq;
-  const receipt = await sendDraftTool(runtime, ctx, "qq_send", args, {
-    onReserve: () => {
-      if (args.readThroughSeq !== undefined)
-        saveReadCheckpointIntent(
-          mem,
-          ctx.conversation,
-          args.requestId,
-          args.readThroughSeq,
-          shownSeq,
-        );
-    },
-  });
-  if (receipt.status !== "sent") return receipt;
-  const receipts = readCheckpointReceipts(mem, ctx.conversation);
-  const intent = Object.hasOwn(receipts, args.requestId)
-    ? receipts[args.requestId]
-    : null;
-  const checkpoint = checkpointFromIntent(intent);
-  const readCheckpoint =
-    intent && Number.isSafeInteger(intent.throughSeq) && intent.throughSeq >= 0
-      ? { throughSeq: intent.throughSeq, applied: false }
-      : null;
-  let result = readCheckpoint ? { ...receipt, readCheckpoint } : receipt;
-  if (checkpoint) {
-    if (!readCheckpointToolEnabled(runtime, ctx)) return result;
-    try {
-      if (
-        !saveReadCheckpointReceipt(
-          mem,
-          ctx.conversation,
-          args.requestId,
-          intent,
-          receipt,
-        )
-      )
-        return result;
-    } catch {
-      return result;
-    }
-    try {
-      runtime.assertActive(ctx);
-    } catch {
-      return result;
-    }
-    try {
-      persistReadCheckpoint(runtime, ctx, checkpoint.throughSeq);
-      readCheckpoint.applied = true;
-    } catch {
-      return result;
-    }
-  }
   if (!args.atUserId) return result;
-  // Someone addressed before they spoke here has not had their card shown.
-  // It comes once with the receipt, so the rest of the turn can use it.
-  const saved = mem.identity.personCard(args.atUserId),
-    card = saved
-      ? withInteraction(
-          mem,
-          saved,
-          runtime.now(),
-          runtime.connection(runtime.agent(ctx.agentId).connectionId).accountId,
-        )
-      : null;
-  if (
-    !card ||
-    // The same seen key as person-cards.mjs: this card, at this revision.
-    mem.state(ctx.conversation).personCardsShown?.[card.personId] ===
-      personCardSeenKey(card)
-  )
+  try {
+    // Someone addressed before they spoke here has not had their card shown.
+    // It comes once with the receipt, so the rest of the turn can use it.
+    const saved = mem.identity.personCard(args.atUserId),
+      card = saved
+        ? withInteraction(
+            mem,
+            saved,
+            runtime.now(),
+            runtime.connection(runtime.agent(ctx.agentId).connectionId)
+              .accountId,
+          )
+        : null;
+    if (
+      !card ||
+      // The same seen key as person-cards.mjs: this card, at this revision.
+      mem.state(ctx.conversation).personCardsShown?.[card.personId] ===
+        personCardSeenKey(card)
+    )
+      return result;
+    markPersonCardShown(mem, ctx.conversation, card);
+    return {
+      ...result,
+      personCard: {
+        personId: card.personId,
+        call: card.call,
+        impression: card.body,
+        interaction: card.interaction,
+        ...(card.adminCloseness ? { adminCloseness: card.adminCloseness } : {}),
+        ...(card.recalledEvidence?.length
+          ? { recalledEvidence: card.recalledEvidence }
+          : {}),
+        revision: card.revision,
+      },
+    };
+  } catch (error) {
+    runtime.diagnostics.report(
+      Error("DELIVERY_CONFIRMED_AUDIT_FAILED", { cause: error }),
+      {
+        component: "runtime",
+        agentId: ctx.agentId,
+        conversation: ctx.conversation,
+      },
+    );
     return result;
-  markPersonCardShown(mem, ctx.conversation, card);
-  return {
-    ...result,
-    personCard: {
-      personId: card.personId,
-      call: card.call,
-      impression: card.body,
-      interaction: card.interaction,
-      ...(card.adminCloseness ? { adminCloseness: card.adminCloseness } : {}),
-      ...(card.recalledEvidence?.length
-        ? { recalledEvidence: card.recalledEvidence }
-        : {}),
-      revision: card.revision,
-    },
-  };
+  }
 }
 async function handle_generated_image_list(runtime, ctx, args, name) {
   const recovery = await runtime.generatedImages.recover(ctx, args);
   return { ...runtime.generatedImages.list(ctx, args), ...recovery };
 }
 async function handle_qq_mark_read(runtime, ctx, args, name) {
-  assertReadCheckpoint(ctx, args.throughSeq);
-  return persistReadCheckpoint(runtime, ctx, args.throughSeq);
+  assertReadCheckpoint(runtime, ctx, args.throughSeq);
+  return processInput(runtime, ctx, args.throughSeq, args.noReply);
 }
 async function handle_qq_set_silence(runtime, ctx, args, name) {
   const mem = runtime.memory.bind(ctx.agentId);

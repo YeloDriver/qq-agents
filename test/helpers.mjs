@@ -7,6 +7,7 @@ import { ConfigStore, validateConfig } from "../src/core/config.mjs";
 import { MemoryStore } from "../src/memory/store.mjs";
 import { Runtime } from "../src/core/runtime.mjs";
 import { localFileSymlinkSkip } from "../scripts/verify.mjs";
+import { writeRelayToken } from "../src/core/relay-auth.mjs";
 // Captured at load: some tests stub process.platform while their hooks run.
 const windows = process.platform === "win32";
 // Only the explicit local runner may mark a named link scenario unavailable.
@@ -65,6 +66,9 @@ export function temp(t) {
     }
   });
   return root;
+}
+export function relayEnvironment(root, adminToken) {
+  return { QQ_UNIFIED_RELAY_TOKEN_FILE: writeRelayToken(root, adminToken) };
 }
 export function config(n = 3) {
   return validateConfig({
@@ -153,7 +157,27 @@ export function fixture(t, { run = async () => {}, cfg = config() } = {}) {
     memory: store,
     configStore,
     backendFactory: () => {
-      const b = { run, cancel: async () => {}, close: async () => {} };
+      const b = {
+        run: async (params) => {
+          const preparing = params.beforeInputSubmitted?.();
+          if (preparing) await preparing;
+          params.onInputSubmitted?.();
+
+          return run({
+            ...params,
+            callTool: async (...args) => {
+              try {
+                const result = await params.callTool(...args);
+                return await deliverFixtureToolOutput(params, result);
+              } catch (error) {
+                throw await deliverFixtureToolOutput(params, error);
+              }
+            },
+          });
+        },
+        cancel: async () => {},
+        close: async () => {},
+      };
       backends.push(b);
       return b;
     },
@@ -198,7 +222,7 @@ export async function sendReviewed(call, args, continueDraft) {
       throw error;
     result = safeToolFailure(error);
   }
-  const token = result.inputReview?.token;
+  const token = result.preparation?.token ?? result.inputReview?.token;
   if (!token) return result;
   const inputReview = { token, decision: "continue" };
   return result.draft && continueDraft
@@ -209,4 +233,23 @@ export async function sendReviewed(call, args, continueDraft) {
         inputReview,
       })
     : call({ ...args, inputReview });
+}
+
+export async function deliverFixtureToolOutput(params, original) {
+  const encode = (value) => {
+    const text = JSON.stringify(
+      value instanceof Error ? safeToolFailure(value) : value,
+    );
+    return { wire: text, text };
+  };
+  const { wire, receipt } = params.finalizeToolOutput
+    ? await params.finalizeToolOutput(original, { encode })
+    : encode(original);
+  params.commitToolOutput?.(receipt, wire);
+  const parsed = JSON.parse(wire);
+  if (original instanceof Error) {
+    original.inputReview = parsed.inputReview;
+    return original;
+  }
+  return parsed;
 }

@@ -84,7 +84,7 @@ export class TurnRunner {
       conversation,
     );
     const ctx = runtime.makeContext(agentId, conversation),
-      { token, controller } = ctx;
+      { controller } = ctx;
     ctx.freshSubject = freshSubject;
     ctx.messageTimingId = timingId;
     let resolveDone;
@@ -145,6 +145,7 @@ export class TurnRunner {
           )
         : { images: [], beforeSubmit() {}, submitted() {} };
       runtime.assertActive(ctx);
+      ctx.requiresInputSubmission = true;
       await this.runBackend(ctx, backend, {
         inputImages: imageInput.images,
         beforeInputSubmitted: imageInput.beforeSubmit,
@@ -157,7 +158,12 @@ export class TurnRunner {
           !runtime.stopped && runtime.contexts.usage(ctx, usage),
         signal: controller.signal,
         tools,
-        callTool: (name, args) => runtime.callTool(ctx, name, args),
+        callTool: (name, args) =>
+          runtime.callTool(ctx, name, args, { deferInput: true }),
+        finalizeToolOutput: (original, options) =>
+          runtime.finalizeToolOutput(ctx, original, options),
+        commitToolOutput: (receipt, text) =>
+          runtime.commitToolOutput(ctx, receipt, text),
         session: prepared.session,
         saveSession: (session) =>
           !runtime.stopped &&
@@ -166,7 +172,7 @@ export class TurnRunner {
             backendId: a.backendId,
             at: runtime.now(),
             inactive:
-              !runtime.capabilities.has(token) ||
+              !runtime.capabilities.has(ctx.token) ||
               controller.signal.aborted ||
               runtime.closed,
             reason: controller.signal.aborted
@@ -178,7 +184,10 @@ export class TurnRunner {
         onBackendTurn: (reference) =>
           !runtime.stopped && recordBackendTurn(mem, ctx.turnId, reference),
         onInputSubmitted: () => {
-          if (!runtime.stopped) {
+          if (!runtime.stopped && !controller.signal.aborted) {
+            runtime.contexts.commitOpening(ctx);
+            ctx.subjectInboxInputSubmitted = true;
+            ctx.backendInputEpoch = ctx.inputEpoch;
             runtime.messageTiming?.mark(timingId, "backendInputSubmitted");
             imageInput.submitted();
             recordInputSubmission(mem, ctx.turnId);
@@ -240,10 +249,11 @@ export class TurnRunner {
                   : "BACKEND_TURN_FAILED"),
         );
     } finally {
-      runtime.capabilities.delete(token);
+      runtime.capabilities.delete(ctx.token);
       try {
         try {
           runtime.subject.finish(ctx, outcome);
+          runtime.subjectInbox.finish(ctx, outcome);
           if (ctx.turnId) await runtime.contexts.finish(ctx, outcome, backend);
         } catch (error) {
           runtime.faults.set(agentId, "CONTEXT_FINALIZATION_FAILED");
@@ -333,10 +343,21 @@ export class TurnRunner {
   async runBackend(ctx, backend, params) {
     const runtime = this.runtime;
     const mem = runtime.memory.bind(ctx.agentId);
+    const backendId = runtime.agent(ctx.agentId).backendId;
     let recoveryStarted = false;
     const stopTyping = startTypingIndicator(runtime, ctx);
     try {
       const result = await runWithRecovery(backend, params, {
+        // A late native reference is useful as history but never owns the turn.
+        onLateSession: (session) => {
+          if (runtime.stopped) return;
+          saveSession(mem, ctx.conversation, session, {
+            turnId: ctx.turnId,
+            backendId,
+            at: runtime.now(),
+            archiveOnly: true,
+          });
+        },
         onFailure: (error, attempt) => {
           const failure = failureSummary(error);
           if (!failure) return;
@@ -362,6 +383,10 @@ export class TurnRunner {
         onRecovery: (error, attempt) => {
           runtime.assertActive(ctx);
           recoveryStarted = true;
+          // The recovery prompt contains no original input manifest. A native
+          // session id alone cannot establish what its new context retained.
+          runtime.contexts.resetInputEvidence(ctx);
+          delete ctx.stagedOpening;
           ctx.recoveryDeliveryBlocked =
             ctx.deliveryAttempted === true || ctx.pendingDeliveries > 0;
           error.deliveryBlocked = ctx.recoveryDeliveryBlocked;
@@ -372,6 +397,10 @@ export class TurnRunner {
               recoveryAttempts: attempt,
               recoveryDeliveryBlocked: ctx.recoveryDeliveryBlocked,
             });
+          if (backend.config?.type === "dsh") {
+            const capability = runtime.rotateCapability(ctx);
+            return `\n本次续接的唯一有效工具凭据 context=${capability}。旧凭据已失效。只在 bridge_tools / bridge_call 外层使用，不得披露。`;
+          }
         },
       });
       return result;

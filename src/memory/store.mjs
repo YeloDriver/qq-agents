@@ -1,3 +1,14 @@
+import {
+  INPUT_SCHEMA_VERSION,
+  initializeInputTables,
+  migrateInputBaselines,
+  writeReviewed,
+} from "./input-state.mjs";
+import {
+  EXPORT_TABLES,
+  exportHeader,
+  withExportManifest,
+} from "./export-format.mjs";
 import { migrateHomeSocial } from "../home/social-schema.mjs";
 import { socialSafeExportRow, mergeProtection } from "./protection.mjs";
 import { withoutClosenessCache } from "../core/closeness.mjs";
@@ -111,7 +122,7 @@ export class MemoryStore {
     this.db = new DatabaseSync(file);
     try {
       const version = this.db.prepare("PRAGMA user_version").get().user_version;
-      if (version > MEMORY_DRAFT_SCHEMA_VERSION)
+      if (version > INPUT_SCHEMA_VERSION)
         throw Error("MEMORY_SCHEMA_NEWER_THAN_CODE");
       if (file !== ":memory:") fs.chmodSync(file, 0o600);
       // Connection settings must take effect before opening a schema transaction.
@@ -182,6 +193,12 @@ export class MemoryStore {
         this.transaction(() => {
           createDraftTables(this.db);
           this.db.exec(`PRAGMA user_version=${MEMORY_DRAFT_SCHEMA_VERSION}`);
+        });
+      if (version < INPUT_SCHEMA_VERSION)
+        this.transaction(() => {
+          initializeInputTables(this.db);
+          migrateInputBaselines(this.db);
+          this.db.exec(`PRAGMA user_version=${INPUT_SCHEMA_VERSION}`);
         });
       migrateHomeSocial(this.db);
       this.due = new ConversationDue(this.db);
@@ -399,11 +416,13 @@ class AgentMemory {
     return recallAnnotation(this.db, this.agentId, id);
   }
   event(row, current, summary = false) {
+    const payload = parse(row.payload);
+    if (row.kind === "message.send-attempt") delete payload.submission;
     const recall = row.kind === "message.recalled";
     const body = recall ? RECALL_NOTICE_BODY : row.body;
     const transcript = row.kind === "voice.transcript",
       voiceTranscript = this.voiceTranscript(row, summary),
-      faces = qqFaces(parse(row.payload).segments);
+      faces = qqFaces(payload.segments);
     return {
       id: row.id,
       seq: row.seq,
@@ -418,9 +437,9 @@ class AgentMemory {
       direction: row.direction,
       origin: row.origin,
       disclosure: disclosure(row.conversation, current),
-      ...mergeProtection(parse(row.payload)),
-      protectedRepositories: parse(row.payload).protectedRepositories || [],
-      ...(parse(row.payload).protectedOperations === true
+      ...mergeProtection(payload),
+      protectedRepositories: payload.protectedRepositories || [],
+      ...(payload.protectedOperations === true
         ? { protectedOperations: true }
         : {}),
       privacy: row.conversation.startsWith("private:")
@@ -433,15 +452,13 @@ class AgentMemory {
         : "Observed speech/event; not independently verified fact",
       body: summary ? body.slice(0, 200) : body,
       bodyTruncated: summary && body.length > 200,
-      ...(transcript
-        ? { sourceEventId: parse(row.payload).sourceEventId }
-        : {}),
+      ...(transcript ? { sourceEventId: payload.sourceEventId } : {}),
       ...(voiceTranscript ? { voiceTranscript } : {}),
       ...(faces ? { qqFaces: faces } : {}),
       ...provenance(row),
       ...this.corrections.annotation("event", row.id),
       ...this.recallAnnotation(row.id),
-      ...(!summary && !recall ? { payload: parse(row.payload) } : {}),
+      ...(!summary && !recall ? { payload } : {}),
     };
   }
   diary(row, summary = false) {
@@ -835,7 +852,7 @@ class AgentMemory {
     return {
       items,
       nextAfterSeq: items.at(-1)?.seq ?? afterSeq,
-      readThroughSeq: items.at(-1)?.seq ?? afterSeq,
+      readThroughSeq: null,
       markReadEligible: conversation === current,
       previousBeforeSeq: items.at(0)?.seq ?? null,
       source: rows.length ? provenance(rows[0]).source : null,
@@ -1126,6 +1143,77 @@ class AgentMemory {
       )
       .run(status, messageId, now(), this.agentId, requestId);
   }
+  // A receipt is the authoritative fact. Local review projection must not
+  // participate in this transaction or an already-sent request can regress.
+  confirmDelivery(
+    requestId,
+    messageId,
+    confirmation,
+    drafts = new QQDraftStore(this.store),
+  ) {
+    const settle = () => {
+      const delivery = this.delivery(requestId);
+      if (!delivery) throw Error("DELIVERY_NOT_FOUND");
+      if (!["pending", "unknown"].includes(delivery.status))
+        throw Error("DELIVERY_ALREADY_SETTLED");
+      this.completeDelivery(requestId, "sent", messageId);
+      return drafts.recordConfirmation(this.agentId, requestId, confirmation);
+    };
+    return this.db.isTransaction ? settle() : this.store.transaction(settle);
+  }
+  projectConfirmedDeliveryReview(requestId) {
+    return this.store.transaction(() => {
+      const delivery = this.delivery(requestId);
+      if (delivery?.status !== "sent") return [];
+      const attempt = this.db
+        .prepare(
+          `SELECT sender_id, connection_id, conversation, payload FROM events
+          WHERE agent_id=? AND dedupe=? AND kind='message.send-attempt'
+            AND direction='out' AND conversation=?`,
+        )
+        .get(
+          this.agentId,
+          "send:" + requestId + ":pending",
+          delivery.conversation,
+        );
+      const payload = attempt && parse(attempt.payload);
+      const review =
+        payload?.submission?.version === 1
+          ? payload.submission.review
+          : payload?.deliveryReview;
+      const scope =
+        attempt &&
+        JSON.stringify([
+          this.agentId,
+          attempt.connection_id,
+          attempt.sender_id,
+          attempt.conversation,
+          payload.messageNamespace || payload.referenceNamespace || "onebot",
+        ]);
+      const imported =
+        review &&
+        this.db
+          .prepare(
+            `SELECT 1 FROM qq_draft_items i
+        JOIN qq_drafts g ON g.id=i.draft_id
+        WHERE i.agent_id=? AND i.delivery_request_id=? AND g.imported=1`,
+          )
+          .get(this.agentId, requestId);
+      const reviewed =
+        !imported &&
+        !payload?.reviewAuditOnly &&
+        payload?.requestId === requestId &&
+        review?.scope === scope &&
+        Array.isArray(review?.refs)
+          ? review.refs.filter(
+              (ref) =>
+                typeof ref?.id === "string" && typeof ref.version === "string",
+            )
+          : [];
+      for (const ref of reviewed) writeReviewed(this.db, scope, requestId, ref);
+      return reviewed;
+    });
+  }
   unresolvedDeliveryCount() {
     return this.db
       .prepare(
@@ -1148,7 +1236,7 @@ class AgentMemory {
     resolution,
     { by = "administrator", messageId = null } = {},
   ) {
-    return this.store.transaction(() => {
+    const result = this.store.transaction(() => {
       const row = this.delivery(requestId);
       if (!row) throw Error("DELIVERY_NOT_FOUND");
       if (row.status !== "unknown") throw Error("DELIVERY_ALREADY_SETTLED");
@@ -1157,12 +1245,32 @@ class AgentMemory {
           "SELECT connection_id,sender_id,body,payload FROM events WHERE agent_id=? AND dedupe=?",
         )
         .get(this.agentId, "send:" + requestId + ":pending");
-      const payload = attempt ? parse(attempt.payload) : {};
+      const {
+        submission: _submission,
+        deliveryReview: _review,
+        reviewAuditOnly: _audit,
+        ...payload
+      } = attempt ? parse(attempt.payload) : {};
       const action = actionDelivery(payload);
       // An action has no new QQ message identity, even if an administrator's
       // reconciliation request happens to include a message ID.
       const resolvedMessageId = action ? null : messageId;
-      this.completeDelivery(requestId, resolution, resolvedMessageId);
+      const drafts = new QQDraftStore(this.store);
+      const draftLinked =
+        resolution === "sent"
+          ? this.confirmDelivery(
+              requestId,
+              resolvedMessageId,
+              {
+                action,
+                messageNamespace:
+                  payload.messageNamespace ||
+                  payload.referenceNamespace ||
+                  "onebot",
+              },
+              drafts,
+            )
+          : this.completeDelivery(requestId, resolution, resolvedMessageId);
       const archive = this.append({
         dedupe: "send:" + requestId + ":reconciled",
         connectionId: attempt?.connection_id || "",
@@ -1186,18 +1294,18 @@ class AgentMemory {
           ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
         },
       });
-      if (resolution === "sent") {
-        const drafts = new QQDraftStore(this.store);
-        if (
-          drafts.recordConfirmation(this.agentId, requestId, {
-            action,
-            messageNamespace: payload.referenceNamespace || "onebot",
-          })
-        )
-          drafts.recordArchive(this.agentId, requestId, archive.id);
-      }
+      if (draftLinked)
+        drafts.recordArchive(this.agentId, requestId, archive.id);
       return { requestId, status: resolution };
     });
+    if (resolution === "sent") {
+      try {
+        this.projectConfirmedDeliveryReview(requestId);
+      } catch {
+        return { ...result, reviewRecorded: false };
+      }
+    }
+    return result;
   }
   // QQ's own copy of a send the gateway could not confirm settles it: same
   // conversation, matching content, within ten minutes, and only one candidate.
@@ -1264,6 +1372,8 @@ class AgentMemory {
           connectionId &&
           (row.connection_id !== connectionId ||
             row.sender_id !== accountId ||
+            (payload.messageNamespace &&
+              payload.messageNamespace !== namespace) ||
             (payload.referenceNamespace &&
               payload.referenceNamespace !== namespace))
         )
@@ -1323,37 +1433,14 @@ class AgentMemory {
   export() {
     const tables = {};
     // Restore reassigns seq in export order; keep it ascending so equal-time order survives.
-    for (const name of [
-      "events",
-      "diaries",
-      "people",
-      "deliveries",
-      "runtime",
-      "migrations",
-      "self_versions",
-      "self_candidates",
-      "intentions",
-      "work_notes",
-      "model_turns",
-      "session_history",
-      "message_progress",
-      "message_aliases",
-      "message_observations",
-      "person_notes",
-      "moods",
-      "person_items",
-      "projects",
-      "memory_corrections",
-      "activity_history",
-      "qzone_approvals",
-      "qq_drafts",
-      "qq_draft_items",
-    ])
+    for (const name of EXPORT_TABLES) {
+      if (name === "diary_revisions") continue;
       tables[name] = this.db
         .prepare(
           `SELECT * FROM ${name} WHERE agent_id=?${name === "events" ? " ORDER BY seq" : name === "moods" ? " ORDER BY rowid" : ""}`,
         )
         .all(this.agentId);
+    }
     tables.person_notes = tables.person_notes.map((row) => ({
       ...row,
       value: json(withoutClosenessCache(parse(row.value))),
@@ -1365,6 +1452,6 @@ class AgentMemory {
       .all(this.agentId);
     for (const [table, rows] of Object.entries(tables))
       tables[table] = rows.map((row) => socialSafeExportRow(table, row));
-    return { version: 1, agentId: this.agentId, exportedAt: now(), tables };
+    return withExportManifest(exportHeader(this.agentId, now()), tables);
   }
 }

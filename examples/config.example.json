@@ -80,6 +80,9 @@
       "connectionId": "napcat-a",
       "backendId": "dsh-desktop",
       "paused": true,
+      "subject": {
+        "inboxEnabled": false
+      },
       "home": {
         "enabled": false,
         "publishing": false,
@@ -110,6 +113,8 @@
       },
       "maxConsecutiveSends": 3,
       "behavior": {
+        "focusedGroupReply": false,
+        "maxOpenDraftsPerConversation": 4,
         "imageInput": {
           "enabled": false,
           "maxImages": 4,
@@ -191,6 +196,9 @@
       "connectionId": "napcat-b",
       "backendId": "codex-cli",
       "paused": true,
+      "subject": {
+        "inboxEnabled": false
+      },
       "home": {
         "enabled": false,
         "publishing": false,
@@ -221,6 +229,8 @@
       },
       "maxConsecutiveSends": 3,
       "behavior": {
+        "focusedGroupReply": false,
+        "maxOpenDraftsPerConversation": 4,
         "imageInput": {
           "enabled": false,
           "maxImages": 4,

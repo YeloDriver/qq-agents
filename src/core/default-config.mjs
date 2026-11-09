@@ -2,6 +2,7 @@
 import { HOME_SOCIAL_DEFAULTS } from "../home/social-policy.mjs";
 // Runtime defaults are source code; examples are generated documentation.
 import { validateConfig } from "./config.mjs";
+import { DEFAULT_MAX_OPEN_DRAFTS } from "./policy.mjs";
 
 // Reuse schema defaults for the console's new-role form and shipped examples.
 export function defaultAgentCapabilities() {
@@ -92,6 +93,7 @@ export function defaultConfig() {
         connectionId: "napcat-a",
         backendId: "dsh-desktop",
         paused: true,
+        subject: { inboxEnabled: false },
         home: {
           enabled: false,
           publishing: false,
@@ -119,6 +121,8 @@ export function defaultConfig() {
         // Two agents on two QQ accounts can tell each other's owners when one
         // goes offline; the administrator turns it on per agent.
         behavior: {
+          focusedGroupReply: false,
+          maxOpenDraftsPerConversation: DEFAULT_MAX_OPEN_DRAFTS,
           imageInput: {
             enabled: false,
             maxImages: 4,
@@ -187,6 +191,7 @@ export function defaultConfig() {
         connectionId: "napcat-b",
         backendId: "codex-cli",
         paused: true,
+        subject: { inboxEnabled: false },
         home: {
           enabled: false,
           publishing: false,
@@ -212,6 +217,8 @@ export function defaultConfig() {
         },
         maxConsecutiveSends: 3,
         behavior: {
+          focusedGroupReply: false,
+          maxOpenDraftsPerConversation: DEFAULT_MAX_OPEN_DRAFTS,
           imageInput: {
             enabled: false,
             maxImages: 4,

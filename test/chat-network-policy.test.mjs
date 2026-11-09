@@ -13,6 +13,7 @@ import {
   raw,
   disclosureApproval,
   sendReviewed,
+  deliverFixtureToolOutput,
 } from "./helpers.mjs";
 import { AppBrowsing } from "../src/apps/service.mjs";
 import { appsPolicySchema, inAppHours } from "../src/apps/policy.mjs";
@@ -104,10 +105,19 @@ async function incoming(
   return row;
 }
 const send = (f, ctx, id) =>
-  sendReviewed((args) => f.runtime.send(ctx, args), {
-    requestId: id,
-    text: "synthetic response",
-  });
+  sendReviewed(
+    async (args) => {
+      try {
+        return await f.runtime.send(ctx, args);
+      } catch (error) {
+        throw await f.runtime.directToolOutput(ctx, error);
+      }
+    },
+    {
+      requestId: id,
+      text: "synthetic response",
+    },
+  );
 function recall(
   f,
   ctx,
@@ -155,7 +165,7 @@ test("unread, repeated, peer, forged, old and truncated input never refills the 
     f.runtime.callTool(ctx, "qq_mark_read", { throughSeq: unread.seq + 1 }),
     /UNSEEN_WATERMARK/,
   );
-  f.runtime.observeInput(ctx, [
+  f.runtime.contexts.seen(ctx, [
     {
       id: unread.id,
       seq: unread.seq,
@@ -727,7 +737,19 @@ test("backend run closures share the durable policy through both prompt protocol
     let runs = 0,
       sends = 0;
     f.runtime.backends.set("agent-0", {
-      run: async ({ callTool, prompt }) => {
+      run: async (params) => {
+        const { prompt } = params;
+        params.onInputSubmitted();
+        const callTool = async (name, args) => {
+          try {
+            return await deliverFixtureToolOutput(
+              params,
+              await params.callTool(name, args),
+            );
+          } catch (error) {
+            throw await deliverFixtureToolOutput(params, error);
+          }
+        };
         runs++;
         assert.equal(prompt.includes("context="), type === "dsh");
         const ctx = [...f.runtime.running.values()][0];

@@ -105,8 +105,11 @@ export function stableInstructions(
           names.has("qq_send_burst")
             ? "表达长短和节奏按当前 self 与聊天需要决定。想自然分成几条消息补充时，使用 qq_send_burst 的 messages 数组，每个元素是一条独立 QQ 消息；在 qq_send.text 里换行仍然只是一条消息。一次说清就停，需要补充再分条，不为凑条数重复同义内容，也不把长文机械切碎。连发使用默认间隔即可，不必为了抢着发完设为零；发送后给对方接话的空间。"
             : "",
+          names.has("qq_draft")
+            ? "保存的草稿先用 qq_draft prepare 核对。需要补读时按返回的入口完整读取，再准备一次。revise 会保存新版并返回准备结果。preparation.state 为 ready 时，用当前 token 明确继续。准备成功后仍需主体决定是否发送。"
+            : "",
           names.has("qq_send") && names.has("qq_mark_read")
-            ? "仅普通消息回复、尚未选择主动意图时，若已实际处理到连续消息水位，可把 conversation_read 返回的 readThroughSeq 作为 qq_send.readThroughSeq 一并提交，省去单独的 qq_mark_read 调用；主动意图发送须省略该字段。只在发送确认成功且本回合仍有效时推进，不把发送期间新到的消息顺带标为已读。"
+            ? "若明确决定某条无需回复，可用 qq_mark_read 的 noReply 提交当前完整版本，仍须落在安全连续水位内；单独标记已读只表示已处理。回复时，仅普通消息回复且尚未选择主动意图时，若已实际处理到连续消息水位，可把 conversation_read 返回的 readThroughSeq 作为 qq_send.readThroughSeq 一并提交，省去单独的 qq_mark_read 调用；主动意图发送须省略该字段。只在发送确认成功且本回合仍有效时推进，不把发送期间新到的消息顺带标为已读。"
             : "",
           names.has("qq_mark_read")
             ? "读完后可以用 qq_mark_read 标记实际已处理的连续消息，然后结束回合，安静地已读不回也很自然，不需要向对方解释。零散查阅不能越过未见间隙，展示本身不等于已经处理；不超过本轮已展示的连续水位；不通过假装没看见或故意记错来表现留白。"
@@ -152,6 +155,14 @@ export function turnEnvironment(runtime, agent, ctx, backendType) {
   if (ctx.conversation === "@subject")
     parts.push(
       `本回合工具额度（替换历史工具额度）：最多调用 ${ctx.subjectToolBudget} 个工具，subject_log 不计入；额度在本回合开始时确定。`,
+    );
+  if (ctx.allowedTools?.includes("subject_inbox_submit"))
+    parts.push(
+      "可用 subject_inbox_submit 把休息、联系、工作接力、专注、相处回顾、串门和共同活动、小窝布置或发布提议交给主人格。决定回执在本会话之后的开场可见；先把当前聊天自然收好。",
+    );
+  if (ctx.allowedTools?.includes("subject_rest"))
+    parts.push(
+      "你可以自主用 subject_rest 决定休息多久，当前及其他正在进行的回合收尾后开始。也可以考虑会话递来的提议，决定现在做、稍后再看或放下。",
     );
   if (ctx.conversation.startsWith("group:"))
     parts.push(

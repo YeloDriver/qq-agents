@@ -155,7 +155,7 @@ export const definitions = {
       .strict(),
   ],
   conversation_read: [
-    "按具体conversation来源键读取账本；省略时仅读当前聊天。查找其他群聊/私聊先用memory_search，不能填写group/private代替具体来源键。aroundId按可靠消息时间展开（同时间按UUID），不能用时间邻文更新已读水位。用nextAroundBefore/After作为aroundCursor继续，保持aroundId和contextSeconds；观察/未知时间只返回锚点，明确引用用memory_related。不把有限窗口当完整历史。",
+    "按具体conversation来源键读取账本；省略时仅读当前聊天。查找其他群聊/私聊先用memory_search，不能填写group/private代替具体来源键。aroundId按可靠消息时间展开（同时间按UUID），不能用时间邻文更新已读水位。用nextAroundBefore/After作为aroundCursor继续，保持aroundId和contextSeconds；观察/未知时间只返回锚点，明确引用用memory_related。顺序分页用 nextAfterSeq；当前聊天的 readThroughSeq 是本轮可提交的连续水位，readGap 指出补读入口。",
     z
       .object({
         conversation: str.optional(),
@@ -193,7 +193,7 @@ export const definitions = {
       .strict(),
   ],
   qq_send: [
-    "向服务端绑定的当前会话发送文字、标准 QQ 表情或已登记图片。text 与 segments 只能选一个；segments 按顺序混排文字和表情，最多32段、累计文字8000字符，纯表情也可发送。例如 [{type:'text',text:'好呀'},{type:'face',id:'20'}]；20=偷笑、5=流泪、14=微笑、28=憨笑、76=赞。只用已登记编号，不猜名称；[QQ表情：名称] 是接收说明，写进 text 只会发送文字。mediaId 仍可追加图片。仅普通消息回复回合可选 readThroughSeq 提交本回合实际处理的连续已读水位；要求 qq_mark_read 仍启用，主动意图回合不得携带。只在本次投递确认成功且回合仍有效时生效；省略时保持原行为。同一 requestId 的重复调用只能补写首次已确认回执绑定的水位，不能借重复调用处理后到消息。存在水位时返回 readCheckpoint={throughSeq,applied}；applied=false 仍表示消息已发送，可用原 requestId 补写同一水位。requestId唯一，超时未知绝不换ID重发。",
+    "向服务端绑定的当前会话发送文字、标准 QQ 表情或已登记图片。text 与 segments 只能选一个；segments 按顺序混排文字和表情，最多32段、累计文字8000字符，纯表情也可发送。例如 [{type:'text',text:'好呀'},{type:'face',id:'20'}]；20=偷笑、5=流泪、14=微笑、28=憨笑、76=赞。只用已登记编号，不猜名称；[QQ表情：名称] 是接收说明，写进 text 只会发送文字。mediaId 仍可追加图片。仅普通消息回复回合、尚未选择主动意图时可选 readThroughSeq 提交本回合实际处理的连续已读水位；要求 qq_mark_read 仍启用，主动意图回合不得携带该字段。只在投递确认成功且回合仍有效时生效；省略保持原行为。同一 requestId 重复调用只能补写首次已确认回执绑定的水位，不能借重复调用处理后到消息。存在水位时返回 readCheckpoint={throughSeq,applied}；applied=false 仍表示消息已发送，有精确冻结证据时可用原创建参数补写同一水位。requestId 是本会话的创建幂等键，应唯一；实际投递编号从回执或 draft.items.requestId 获取。开场输入完整时可一次发送；若返回草稿，按 preparation 补读或决定是否用 qq_draft 继续。超时未知绝不换 requestId 重发。",
     z
       .object({
         requestId: str.min(1).max(200),
@@ -223,7 +223,7 @@ export const definitions = {
       .strict(),
   ],
   qq_delivery_status: [
-    "只读查询本角色当前聊天的投递账本，默认只看 pending/unknown；可按 nextOffset 分页，unresolvedOnly=false 查看其他结果。不发送、不重试、不确认状态，不可换编号重发未知结果。",
+    "只读查询本角色当前聊天的投递账本，默认只看 pending/unknown；可按 nextOffset 分页，unresolvedOnly=false 查看其他结果。按发送回执或 draft.items.requestId 中的实际投递编号核对；创建编号用于查询原稿件。不发送、不重试、不确认状态，不可换编号重发未知结果。",
     z
       .object({
         offset: z.number().int().min(0).optional(),
@@ -233,8 +233,16 @@ export const definitions = {
       .strict(),
   ],
   qq_mark_read: [
-    "仅提交当前会话已看到的安全消息水位；不能使用跨会话结果的readThroughSeq。conversation_read的markReadEligible必须为true，不能超过已展示水位。",
-    z.object({ throughSeq: z.number().int().min(0) }).strict(),
+    "仅提交当前会话已看到的安全消息水位；不能使用跨会话结果的readThroughSeq。conversation_read 的 markReadEligible 必须为 true，不能超过已展示水位。默认只提交已处理；明确决定无需回复的消息可在 noReply 传入当前回合完整展示所返回的 id 和 version，每批最多 50 项。该决定只影响以后独立回合的审阅。",
+    z
+      .object({
+        throughSeq: z.number().int().min(0),
+        noReply: z
+          .array(z.object({ id: str, version: str }).strict())
+          .max(50)
+          .optional(),
+      })
+      .strict(),
   ],
   qq_set_silence: [
     "让当前会话潜水指定分钟；不解除管理员暂停。",

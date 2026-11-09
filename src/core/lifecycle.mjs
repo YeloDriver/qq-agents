@@ -38,7 +38,14 @@ import { elsewhereForTurn } from "./elsewhere.mjs";
 import { floorForTurn } from "./floor.mjs";
 import { taskBrief } from "./scheduler.mjs";
 import { recallBoundary, recallPage } from "./recall-boundary.mjs";
-import { recordReviewPresentation } from "./input-review.mjs";
+import {
+  commitInputPresentation,
+  describeInputPresentation,
+  focusedGroupReplyEnabled,
+  inputProjection,
+  processingPending,
+} from "./input-review.mjs";
+import { liveInput } from "./live-input.mjs";
 import { draftHints } from "../tools/qq-drafts.mjs";
 import {
   retireSession,
@@ -103,7 +110,7 @@ function dropRepeats(handoff, history, materials, schedule) {
 function draftPrompt(runtime, ctx) {
   const page = draftHints(runtime, ctx);
   return page.items.length || page.nextOffset !== null
-    ? `本聊天待处理草稿（qq_draft 查看原稿、修改、放弃或显式继续；已发送和未知项不可重发）：${JSON.stringify(page)}`
+    ? `本聊天待处理草稿（qq_draft 查看原稿、修改、放弃或准备；只有 ready 的当前版本可带令牌继续，已发送和未知项不可重发）：${JSON.stringify(page)}`
     : "";
 }
 // This is a fallback estimate, not a provider tokenizer. Keep non-ASCII text,
@@ -129,9 +136,6 @@ export class ContextLifecycle {
   }
   constructor(runtime) {
     this.runtime = runtime;
-    runtime.memory.db.exec(
-      `CREATE TABLE IF NOT EXISTS message_progress(agent_id TEXT NOT NULL,conversation TEXT NOT NULL,seq INTEGER NOT NULL,summary_only INTEGER NOT NULL,PRIMARY KEY(agent_id,conversation,seq));`,
-    );
     // A prior process cannot still own a local turn. Never replay pending network operations.
     runtime.memory.db
       .prepare("UPDATE deliveries SET status='unknown' WHERE status='pending'")
@@ -146,50 +150,60 @@ export class ContextLifecycle {
     }
   }
   seen(ctx, items) {
-    const m = this.runtime.memory.bind(ctx.agentId),
-      db = m.db;
-    for (const row of items)
-      if (
-        row.conversation === ctx.conversation &&
-        Number.isSafeInteger(row.seq)
-      ) {
-        db.prepare(
-          "INSERT INTO message_progress VALUES(?,?,?,?) ON CONFLICT(agent_id,conversation,seq) DO UPDATE SET summary_only=MIN(summary_only,excluded.summary_only)",
-        ).run(
-          ctx.agentId,
-          ctx.conversation,
-          row.seq,
-          +(!!row.summaryOmitted || !!row.bodyTruncated),
-        );
+    const staged = this.stageSeen(ctx, items);
+    this.commitSeen(ctx, staged);
+    return staged.checkpoint;
+  }
+  stageSeen(ctx, items, presentation = items) {
+    if (!/^(group|private):/.test(ctx.conversation))
+      return { items, proofs: new Map(), checkpoint: { readThroughSeq: 0 } };
+    const proofs = describeInputPresentation(this.runtime, ctx, presentation);
+    const checkpoint = inputProjection(this.runtime, ctx, presentation, proofs);
+    return { items, proofs, checkpoint };
+  }
+  commitSeen(ctx, { items, proofs }) {
+    const m = this.runtime.memory.bind(ctx.agentId);
+    const commit = () => {
+      if (/^(group|private):/.test(ctx.conversation)) {
+        commitInputPresentation(this.runtime, ctx, proofs);
+        this.runtime.observeInput(ctx, items);
       }
-    this.runtime.observeInput(ctx, items);
-    for (const row of items) {
-      trackPeerQzone(ctx, row);
-      if (row.id && row.privacy !== "public") ctx.privateRead.add(row.id);
-      for (const repo of row.protectedRepositories || [])
-        ctx.privateRead.add(githubMarker(repo));
-    }
-    ctx.persistTaint?.();
-    rememberSources(m, ctx.conversation, items);
-    const state = m.state(ctx.conversation),
-      baseline = state.readThroughSeq || 0;
-    const gap = db
-      .prepare(
-        `SELECT MIN(e.seq) AS seq FROM events e LEFT JOIN message_progress p ON p.agent_id=e.agent_id AND p.conversation=e.conversation AND p.seq=e.seq WHERE e.agent_id=? AND e.conversation=? AND e.seq>? AND p.seq IS NULL`,
-      )
-      .get(ctx.agentId, ctx.conversation, baseline).seq;
-    const through = Math.max(
-      baseline,
-      db
-        .prepare(
-          "SELECT MAX(seq) AS seq FROM message_progress WHERE agent_id=? AND conversation=? AND seq<?",
-        )
-        .get(ctx.agentId, ctx.conversation, gap || Number.MAX_SAFE_INTEGER)
-        .seq || 0,
-    );
-    ctx.shownSeq = through;
-    m.setState(ctx.conversation, { ...state, seenThroughSeq: through });
-    return through;
+      for (const row of items) {
+        trackPeerQzone(ctx, row);
+        if (row.id && row.privacy !== "public") ctx.privateRead.add(row.id);
+        for (const repo of row.protectedRepositories || [])
+          ctx.privateRead.add(githubMarker(repo));
+      }
+      ctx.persistTaint?.();
+      rememberSources(m, ctx.conversation, items);
+    };
+    if (m.db.isTransaction) commit();
+    else m.store.transaction(commit);
+  }
+  commitOpening(ctx) {
+    if (!ctx.stagedOpening || ctx.openingCommitted) return;
+    this.commitSeen(ctx, ctx.stagedOpening);
+    ctx.openingReviewInput = new Map(ctx.presentedInput);
+    ctx.openingCommitted = true;
+  }
+  resetInputEvidence(ctx) {
+    ctx.cancelInputWait?.();
+    ctx.cancelInputWait = undefined;
+    ctx.waiting = false;
+    ctx.waitObservedMs = 0;
+    ctx.observationSatisfied = false;
+    ctx.conversationPageThroughSeq = undefined;
+    ctx.inputEpoch = randomUUID();
+    ctx.openingCommitted = false;
+    ctx.toolOutputReceipts = undefined;
+    ctx.relayOutputReceipts = undefined;
+    ctx.presentedInput?.clear();
+    ctx.openingReviewInput?.clear();
+    ctx.confirmedReviewInput?.clear();
+    ctx.inputPages?.clear();
+    ctx.requestEvents.clear();
+    ctx.requestVersions?.clear();
+    ctx.shownSeq = 0;
   }
   handoff(agentId, conversation, options = {}) {
     const boundary = recallBoundary(
@@ -300,12 +314,6 @@ export class ContextLifecycle {
           : [],
       contactHistoryNotice:
         "最近联系结果最多 20 项；更早结果用 intent_list 分页回查。",
-      summaryOnly: m.db
-        .prepare(
-          "SELECT seq FROM message_progress WHERE agent_id=? AND conversation=? AND summary_only=1 ORDER BY seq DESC LIMIT 30",
-        )
-        .all(agentId, conversation)
-        .map((x) => x.seq),
       scheduled:
         this.runtime.scheduler
           ?.list(agentId)
@@ -512,6 +520,39 @@ export class ContextLifecycle {
       m.setState(row.conversation, s);
     }
   }
+  focusedOpening(ctx, memory, reasons, items) {
+    const r = this.runtime;
+    if (!focusedGroupReplyEnabled(r, ctx)) return null;
+    const seqs = reasons.map(({ seq }) => seq).filter(Number.isSafeInteger);
+    if (!seqs.length) return null;
+    const latest = memory.db
+      .prepare(
+        "SELECT id,seq FROM events WHERE agent_id=? AND conversation=? AND kind='message.received' AND seq IN (SELECT value FROM json_each(?)) ORDER BY seq DESC LIMIT 1",
+      )
+      .get(ctx.agentId, ctx.conversation, JSON.stringify(seqs));
+    if (
+      !latest ||
+      !liveInput(r, ctx.agentId, ctx.conversation, latest.id)?.message_id
+    )
+      return null;
+    const existing = items.find(({ id }) => id === latest.id);
+    if (existing) return existing;
+    const page = recallPage(
+      r,
+      ctx,
+      memory.conversation(
+        {
+          conversation: ctx.conversation,
+          afterSeq: latest.seq - 1,
+          limit: 1,
+          maxChars: 4000,
+          fullText: true,
+        },
+        ctx.conversation,
+      ),
+    );
+    return page.items.find(({ id }) => id === latest.id) ?? null;
+  }
   prepare(ctx, backend, reasons, tools = []) {
     if (ctx.controller.signal.aborted) throw Error("ABORTED");
     const r = this.runtime,
@@ -622,7 +663,37 @@ export class ContextLifecycle {
               ctx.conversation,
             ),
           );
-    this.seen(ctx, history.items);
+    const openingHistory = chatHistory(history);
+    const focus = this.focusedOpening(ctx, m, reasons, history.items);
+    ctx.focusedReplyId = focus?.id;
+    const separateFocus =
+      focus && !history.items.some(({ id }) => id === focus.id);
+    const focusedMessage = separateFocus
+      ? chatHistory({ items: [focus] }).items[0]
+      : null;
+    ctx.stagedOpening = this.stageSeen(
+      ctx,
+      separateFocus ? [...history.items, focus] : history.items,
+      /^(group|private):/.test(ctx.conversation)
+        ? [
+            ...openingHistory.items,
+            ...(focusedMessage ? [focusedMessage] : []),
+          ].map((item) => ({
+            ...item,
+            conversation: ctx.conversation,
+          }))
+        : history.items,
+    );
+    Object.assign(openingHistory, ctx.stagedOpening.checkpoint);
+    if (/^(group|private):/.test(ctx.conversation))
+      openingHistory.processingPending = processingPending(r, ctx).map(
+        ({ id, seq, version }) => ({
+          id,
+          seq,
+          version,
+          continuation: { tool: "memory_read", id, offset: 0 },
+        }),
+      );
     ctx.feedThroughSeq = history.nextAfterSeq || s.feedThroughSeq || 0;
     const people =
       ctx.conversation === SUBJECT
@@ -692,6 +763,9 @@ export class ContextLifecycle {
     ])
       ctx.privateRead.add(item.continuation.id);
     r.subject.trackForTurn(ctx);
+    const proposals =
+      ctx.conversation === SUBJECT ? r.subjectInbox.offer(ctx, a) : null;
+    const feedback = r.subjectInbox.feedback(ctx, a);
     ctx.persistTaint?.();
     const materials =
       ctx.conversation === SUBJECT ? subjectMaterials(r, ctx) : null;
@@ -741,7 +815,6 @@ export class ContextLifecycle {
         ? `你和这些人之间还没了结的事（你自己用 person_item 记下的）：boundary 是对方的相处边界，照着调整；promise 是你答应对方的事，做到了就回来交代，做不成就坦白，交代后用 person_item 关掉；shared 是一起经历过的事，合适时自然接回来，不必硬提。fromPrivate 的记在别的私聊里，只用来调整你自己的做法，不要在这里提起内容。${JSON.stringify({ items: between.items, ...(Object.keys(between.more).length ? { more: between.more } : {}) })}`
         : "",
     ];
-    const openingHistory = chatHistory(history);
     const prompt = (
       !/^(group|private):/.test(ctx.conversation)
         ? [
@@ -749,6 +822,9 @@ export class ContextLifecycle {
             `唤醒原因（资料）: ${JSON.stringify(wake)}`,
             environment,
             handoff ? `程序交接状态：${JSON.stringify(handoff)}` : "",
+            proposals
+              ? `会话交给你的提议（资料，时效由你判断；用 subject_inbox_decide 处理或暂缓）：${JSON.stringify(proposals)}`
+              : "",
             ctx.conversation === SUBJECT
               ? `空闲时间素材：${JSON.stringify(materials)}`
               : `新增消息：${JSON.stringify(history)}`,
@@ -766,7 +842,13 @@ export class ContextLifecycle {
               replay.earlierOmitted)
               ? `最近对话（历史回放）：${JSON.stringify(replay)}`
               : "",
+            focus
+              ? `本轮可优先引用回复：用 qq_send 的 replyTo=${JSON.stringify(focus.messageId)} 回复这条来信。只针对这条消息及明确引用它的补充，遇到续读入口先读齐。旧积压保留，之后按处理水位继续；不要为这条引用回复提交跨过缺口的已读水位。${focusedMessage ? ` 当前来信：${JSON.stringify(focusedMessage)}` : ""}`
+              : "",
             `新增消息：${JSON.stringify(openingHistory)}`,
+            feedback?.length
+              ? `你在本会话递交的提议回执（资料，不代表已投递或对方已同意）：${JSON.stringify(feedback)}`
+              : "",
             ...chatStatus(r, ctx, history, handoff),
             ctx.allowedTools?.includes("qq_draft") ? draftPrompt(r, ctx) : "",
             ...details,
@@ -779,15 +861,6 @@ export class ContextLifecycle {
     )
       .filter(Boolean)
       .join("\n\n");
-    recordReviewPresentation(
-      r,
-      ctx,
-      openingHistory.items.map((item) => ({
-        ...item,
-        conversation: ctx.conversation,
-      })),
-    );
-    ctx.openingReviewInput = new Map(ctx.presentedReviewInput);
     m.setState(ctx.conversation, {
       ...m.state(ctx.conversation),
       loadedSelfVersion: self.version,
