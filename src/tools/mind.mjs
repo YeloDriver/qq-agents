@@ -2,6 +2,7 @@ import { projectSnapshotProof } from "../home/project-snapshots.mjs";
 import { socialSources } from "../core/social-protection.mjs";
 import { peerQzoneSources } from "../core/peer-qzone-protection.mjs";
 import { withInteraction } from "../core/closeness.mjs";
+import { subjectSourceReference } from "../core/subject-materials.mjs";
 import {
   activityFields,
   projectReadSchema,
@@ -46,7 +47,7 @@ export const mindDefinitions = {
     z.object({ offset: z.number().int().min(0).default(0) }).strict(),
   ],
   self_propose: [
-    "提出 self 候选，不能直接改写正式 self。提供原始经历、反例和原因；当前版本冲突应重读后重新考虑。",
+    "从自己的持续经历提出 self 候选，不能直接改写正式 self。先 self_read 读完整当前版、self_candidates 看已有候选；body 是以当前完整 Self 为基础的小范围修订，不是单独的一句补充。提供原始经历、反例和原因；没有新的稳定变化不必提出。完全相同且仍待回顾的提案返回原候选，不重置延迟；当前版本冲突应重读后重新考虑。",
     z
       .object({
         body: text.max(16000),
@@ -117,7 +118,7 @@ export const mindDefinitions = {
       .strict(),
   ],
   person_item: [
-    "记下或更新你和某个人之间的一件事，放在人物卡旁边。kind 三选一：promise 是你答应对方、还没做完的事（“我回头查查”“下次接着讲”），只记真打算做的，客套话不用记；shared 是你们一起经历过、以后可能接回来的事（一起讨论过的结局、给角色起的梗、约好下次继续的故事）；boundary 是对方明确表示的相处边界或发生过的误会（不喜欢的称呼或玩笑、误会后来有没有解释清楚），记下后真的照着调整，不要道歉一次又重犯。body 用你自己的话写这件事（最多 300 字），evidence 至少一条记录 ID。新记录省略 id；更新或关掉时带 id 和当前 expectedRevision。promise 做到了、回来交代过就 status=done；做不成，坦白告诉对方后 status=dropped；边界或经历不再适用也用 dropped。关掉要写 outcome（结果怎样、怎么交代的），evidence 里必须有一条在这件事记下之后的聊天消息：你回来交代的那句话（qq_send 结果里的 recordId），或者对方说不用了的那句话。只在空闲时间想过不算交代。这些记录在所有群聊和私聊共用；在私聊里记下的事，到了别的聊天只用来调整你自己的做法，不要提起内容。",
+    "记下或更新你和某个人之间的一件事，放在人物卡旁边。kind 三选一：promise 是你答应对方、还没做完的事（“我回头查查”“下次接着讲”），只记真打算做的，客套话不用记；shared 是你们一起经历过、以后可能接回来的事（一起讨论过的结局、给角色起的梗、约好下次继续的故事）；boundary 是对方明确表示的相处偏好与边界，包括欢迎你主动联系、分享某类内容、不喜欢的称呼或玩笑，以及发生过的误会。正向偏好也要按原始聊天证据保存，不把玩笑或你的猜测当要求；重复表达先读 person_items，再更新已有条目。偏好帮助你选择怎么相处，不是每日联系任务、发送授权或正式提醒，也不用为了记住它而改 Self。body 用你自己的话写这件事（最多 300 字），evidence 至少一条记录 ID。新记录省略 id；更新或关掉时带 id 和当前 expectedRevision。promise 做到了、回来交代过就 status=done；做不成，坦白告诉对方后 status=dropped；边界或经历不再适用也用 dropped。关掉要写 outcome（结果怎样、怎么交代的），evidence 里必须有一条在这件事记下之后的聊天消息：你回来交代的那句话（qq_send 结果里的 recordId），或者对方说不用了的那句话。只在空闲时间想过不算交代。这些记录在所有群聊和私聊共用；在私聊里记下的事，到了别的聊天只用来调整你自己的做法，不要提起内容。",
     z
       .object({
         id: text.optional(),
@@ -132,7 +133,7 @@ export const mindDefinitions = {
       .strict(),
   ],
   person_items: [
-    "读取你和某些人之间记下的事（答应的事、共同经历、相处边界）：给 personIds 读这些人的全部记录，没了结的在前，附最近关掉的；省略时按最久未了结的在前分页列出所有人的 open 记录，可用 kind 只看一类。",
+    "读取你和某些人之间记下的事（答应的事、共同经历、相处偏好与边界）：给 personIds 读这些人的全部记录，没了结的在前，附最近关掉的；省略时按最久未了结的在前分页列出所有人的 open 记录，可用 kind 只看一类。",
     z
       .object({
         personIds: z
@@ -189,7 +190,7 @@ export const mindDefinitions = {
     z.object({}).strict(),
   ],
   intent_create: [
-    "创建普通聊天意图（不是正式提醒），允许带保护标记保存。主体不能直接发送；目标聊天可暂缓/放弃，受保护资料不向未经授权的目标自动交接或发送。主题跨群去重；expiresAt/eligibleAt 为 Unix 毫秒。",
+    "创建普通聊天意图（不是正式提醒），允许带保护标记保存。普通网页的阅读发现可用实际 web_fetch 返回的 sourceRecordId 作为 evidence，background 说明读到的范围和想聊的内容；App 平台记录改用 app_share_propose。主体不能直接发送；目标聊天可暂缓/放弃，受保护资料不向未经授权的目标自动交接或发送。主题跨群去重；expiresAt/eligibleAt 为 Unix 毫秒。",
     z
       .object({
         topic: text.max(300),
@@ -226,7 +227,7 @@ export const mindDefinitions = {
       .strict(),
   ],
   subject_log: [
-    "空闲时间结束前记一笔：做了什么、发现了什么、下次想接着做什么。下次空闲时间会先看到最近几条，管理员也能看到。选择休息也要记录原因。found 可附上浏览/读取工具返回的 sourceRecordId。",
+    "空闲时间结束前记一笔：做了什么、发现了什么、下次想接着做什么。下次空闲时间会先看到最近几条，管理员也能看到。选择休息也要记录原因。found.sourceRecordId 填自己实际 App 浏览结果的 recordId 或 web_fetch 返回的 sourceRecordId，不能猜编号；程序校验归属与来源，下一轮保留可回查引用，但引用不增加分享权限。",
     z
       .object({
         did: z.enum([
@@ -527,6 +528,13 @@ function executeMindTool(runtime, ctx, name, args) {
     if (ctx.conversation !== "@subject") throw Error("TOOL_DISABLED");
     if (args.did === "rested" && !args.restReason)
       throw Error("SUBJECT_LOG_REQUIRES_REASON");
+    const sources = (args.found || [])
+      .filter((found) => found.sourceRecordId)
+      .map(
+        (found) =>
+          subjectSourceReference(runtime, ctx, found.sourceRecordId).record,
+      );
+    trackMindRecords(runtime, ctx, sources, "subject-log-source");
     const mood = identity.currentMood(now);
     const record = m.append({
       dedupe: "subject-log:" + ctx.turnId + ":" + randomUUID(),

@@ -66,6 +66,21 @@ Antigravity 可选 `cliReuse` 只适用于此后端：`enabled` 默认 `false`�
 
 ## 在管理台配置角色
 
+### 空闲网页阅读与主动联系
+
+`subject.enabled` 开启角色自己的空闲回合，联系对象仍由 `subject.groups`、`subject.users`、`subject.owners`、`subject.peers` 与聊天白名单共同决定。自然语言中的联系偏好会作为相处记录保存和考虑，不会自动开启主体或添加可联系对象。
+
+让已获自主联网授权的角色在空闲时读取普通公开网页，需要同时允许角色工具 `web_fetch` 并将其加入 `subject.readTools`；自主联网由 `network.autonomous` 控制。示例中的局部字段如下，保存时保留其他已有工具与配置：
+
+```json
+{
+  "network": { "autonomous": true },
+  "subject": { "enabled": true, "readTools": ["web_fetch"] }
+}
+```
+
+内置 App 浏览使用已有平台工具、`apps.enabled`、平台名单和时段规则，不因 `subject.readTools` 为空而自动关闭。外部搜索服务另需 `subject.externalReads` 与已配置服务器工具白名单，不能只填一个搜索工具名。联系、阅读额度与平台时段保留已有显式值；本次行为引导不提高默认额度，不自动给旧角色扩充工具或联系人。
+
 新建角色、缺省配置和管理台添加角色使用一致的能力默认值：完整工具目录默认勾选，自主联网、平台浏览与分享、文件收发、GitHub、定时任务、TTS、跨群查询和运维工具开关默认开启。已有显式 `false`、平台选择和工具列表（包括空列表）保持原样，不在升级时覆盖。
 
 网页游戏是默认能力策略的例外：全局 `games.enabled` 和角色 `games.enabled` 均默认关闭；需单独设置公网入口并完成外部验证，首个适配后端为 Codex，见 [P2 游戏配置](WEB-GAME-P2.md)。游戏公开设定 `games.publicPersona` 不继承聊天 persona 或 Self；对手显示名 `games.publicName`、头像 `games.avatar`（默认 `"qq"`，仅 `live` 模式下载本账号 QQ 头像）和落子台词 `games.remarks`/`games.remarkStyle` 也只作用于游戏网页。

@@ -16,6 +16,8 @@ const required = (value, max) => {
     throw Error("INVALID_SELF_TEXT");
   return value.trim();
 };
+const evidenceKey = (ids) =>
+  JSON.stringify([...new Set(Array.isArray(ids) ? ids : [])].sort());
 export function migrateIdentity(db) {
   if (db.prepare("PRAGMA user_version").get().user_version >= 4) return;
   db.exec(`CREATE TABLE IF NOT EXISTS self_versions(agent_id TEXT NOT NULL,version INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(agent_id,version));
@@ -216,36 +218,54 @@ export class IdentityMemory {
       scope = "interest",
       expectedVersion,
     } = input;
-    required(body, policy.maxBodyChars);
+    const normalizedBody = required(body, policy.maxBodyChars);
     required(reason, 2000);
     if (!["interest", "habit", "relationship"].includes(scope))
       throw Error("INVALID_SELF_SCOPE");
-    if (this.current()?.version !== expectedVersion)
-      throw Error("SELF_VERSION_CONFLICT");
-    const evidenceSnapshot = this.freeze(evidence, now),
-      counterEvidenceSnapshot = this.freeze(counterEvidence, now),
-      roots = evidenceSnapshot.roots;
-    const value = {
-      id: randomUUID(),
-      body,
-      reason,
-      evidence,
-      counterEvidence,
-      evidenceSnapshot,
-      counterEvidenceSnapshot,
-      roots,
-      scope,
-      baseVersion: expectedVersion,
-      revision: 1,
-      status: "pending",
-      conversation: ctx.conversation,
-      createdAt: now,
-      reviewAfter:
-        now +
-        (scope === "interest" ? policy.minorDelayMs : policy.majorDelayMs),
-      reviews: [],
-    };
-    return this.put("self_candidates", value);
+    return this.mem.store.transaction(() => {
+      if (this.current()?.version !== expectedVersion)
+        throw Error("SELF_VERSION_CONFLICT");
+      // Validate and freeze every source before deduplication so a retry cannot
+      // bypass ownership, provenance, or evidence checks.
+      const evidenceSnapshot = this.freeze(evidence, now),
+        counterEvidenceSnapshot = this.freeze(counterEvidence, now),
+        roots = evidenceSnapshot.roots,
+        evidenceSignature = evidenceKey(evidence),
+        counterEvidenceSignature = evidenceKey(counterEvidence),
+        duplicate = this.list("self_candidates").find(
+          (candidate) =>
+            ["pending", "observing"].includes(candidate.status) &&
+            candidate.baseVersion === expectedVersion &&
+            candidate.scope === scope &&
+            typeof candidate.body === "string" &&
+            candidate.body.trim() === normalizedBody &&
+            evidenceKey(candidate.evidence || []) === evidenceSignature &&
+            evidenceKey(candidate.counterEvidence || []) ===
+              counterEvidenceSignature,
+        );
+      if (duplicate) return duplicate;
+      const value = {
+        id: randomUUID(),
+        body,
+        reason,
+        evidence,
+        counterEvidence,
+        evidenceSnapshot,
+        counterEvidenceSnapshot,
+        roots,
+        scope,
+        baseVersion: expectedVersion,
+        revision: 1,
+        status: "pending",
+        conversation: ctx.conversation,
+        createdAt: now,
+        reviewAfter:
+          now +
+          (scope === "interest" ? policy.minorDelayMs : policy.majorDelayMs),
+        reviews: [],
+      };
+      return this.put("self_candidates", value);
+    });
   }
   review(input, ctx, policy, now) {
     if (ctx.conversation !== "@subject") throw Error("SUBJECT_REVIEW_REQUIRED");

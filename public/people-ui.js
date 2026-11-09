@@ -51,7 +51,7 @@ function personMoods(c) {
 const peopleItemKinds = {
   promise: "答应的事",
   shared: "共同经历",
-  boundary: "相处边界",
+  boundary: "相处偏好与边界",
 };
 const peopleItemStates = { open: "未了结", done: "已兑现", dropped: "已放下" };
 const peopleItemPlace = (c) =>

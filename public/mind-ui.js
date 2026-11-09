@@ -76,19 +76,86 @@ function toolCallsMarkup(calls) {
   if (!shown.length) return '<p class="mind-tools is-none">没有调用工具</p>';
   const tools = new Map();
   for (const c of shown) {
-    const key = c.name + (c.ok ? "" : "\n");
-    if (!tools.has(key)) tools.set(key, { name: c.name, ok: !!c.ok, n: 0 });
+    const code = c.ok
+      ? ""
+      : typeof c.code === "string" && /^[A-Z][A-Z0-9_]{2,80}$/.test(c.code)
+        ? c.code
+        : "";
+    const key = JSON.stringify([c.name, !!c.ok, code]);
+    if (!tools.has(key))
+      tools.set(key, { name: c.name, ok: !!c.ok, code, n: 0 });
     tools.get(key).n++;
   }
   const failed = shown.filter((c) => !c.ok).length,
     chips = [...tools.values()]
-      .sort((x, y) => x.ok - y.ok)
-      .map(
-        (x) =>
-          `<span class="mind-chip${x.ok ? "" : " is-failed"}" title="${esc(x.name)} · ${x.ok ? "" : "失败 "}${x.n} 次">${esc(toolLabel(x.name))}${x.ok ? "" : " 失败"}${x.n > 1 ? `<b>×${x.n}</b>` : ""}</span>`,
+      .sort(
+        (x, y) =>
+          Number(x.ok) - Number(y.ok) ||
+          x.name.localeCompare(y.name) ||
+          x.code.localeCompare(y.code),
       )
+      .map((x) => {
+        const detail = x.ok
+          ? `${x.n} 次`
+          : `失败 ${x.n} 次${x.code ? ` · ${x.code}` : ""}`;
+        return `<span class="mind-chip${x.ok ? "" : " is-failed"}" title="${esc(x.name)} · ${detail}"${x.code ? ` aria-label="${esc(x.name)} · ${detail}"` : ""}>${esc(toolLabel(x.name))}${x.ok ? "" : ` 失败${x.code ? ` · ${esc(x.code)}` : ""}`}${x.n > 1 ? `<b>×${x.n}</b>` : ""}</span>`;
+      })
       .join("");
   return `<details class="mind-tools"><summary>工具 ${shown.length} 次${failed ? `<span class="mind-failed">${failed} 次失败</span>` : ""}</summary><div class="mind-chips">${chips}</div></details>`;
+}
+function initiativeActivityMarkup(activity, area) {
+  if (!activity?.day || !activity?.week) return "";
+  const fields = {
+      self: [
+        ["提案", ["self", "proposed"]],
+        ["期间到期", ["self", "due"]],
+        ["回顾", ["self", "reviewed"]],
+      ],
+      subject: [
+        ["成功阅读", ["reading", "successful"]],
+        ["分享提案", ["sharing", "proposed"]],
+        ["已确认分享", ["sharing", "confirmed"]],
+        ["发送中", ["sharing", "pending"]],
+        ["结果未知", ["sharing", "unknown"]],
+      ],
+      intents: [
+        ["创建", ["intents", "created"]],
+        ["等待事件", ["intents", "waiting"]],
+        ["暂缓", ["intents", "deferred"]],
+        ["取消", ["intents", "cancelled"]],
+        ["账本确认发送", ["intents", "confirmedSent"]],
+        ["发送前工具拒绝", ["intents", "sendRejected"]],
+        ["投递失败", ["intents", "deliveryFailed"]],
+        ["发送中", ["intents", "pending"]],
+        ["结果未知", ["intents", "unknown"]],
+      ],
+    },
+    title = {
+      self: "近期 Self 活动",
+      subject: "近期阅读与分享",
+      intents: "近期意图状态",
+    }[area],
+    value = (period, [group, key]) => {
+      const n = period?.[group]?.[key];
+      return Number.isFinite(n) ? n : 0;
+    },
+    describe = (period) =>
+      fields[area]
+        .map(([label, path]) => `${label} ${value(period, path)}`)
+        .join(" · "),
+    day = describe(activity.day),
+    week = describe(activity.week),
+    brief = {
+      self: `24 小时提案 ${value(activity.day, ["self", "proposed"])} · 回顾 ${value(activity.day, ["self", "reviewed"])} · 7 天提案 ${value(activity.week, ["self", "proposed"])}`,
+      subject: `24 小时阅读 ${value(activity.day, ["reading", "successful"])} · 分享 ${value(activity.day, ["sharing", "confirmed"])} · 7 天分享 ${value(activity.week, ["sharing", "confirmed"])}`,
+      intents: `24 小时创建 ${value(activity.day, ["intents", "created"])} · 确认 ${value(activity.day, ["intents", "confirmedSent"])} · 工具拒绝 ${value(activity.day, ["intents", "sendRejected"])}`,
+    }[area];
+  return mindFold(
+    `initiative-activity-${area}`,
+    title,
+    `<p class="mind-meta">最近 24 小时：${esc(day)}</p><p class="mind-meta">最近 7 天：${esc(week)}</p>`,
+    { summary: esc(brief) },
+  );
 }
 const subjectDidTone = { "reached-out": "ok", rested: "off" };
 function subjectLogMarkup(subject) {
@@ -200,6 +267,7 @@ function selfMarkup(a, data) {
       ? "请在角色设置中确认原有外形；确认前保留初始 self，禁止替换。"
       : "未设置固定外形");
   return `<section class="card self-card"><div class="row"><h2>当前 self · v${current.version}</h2><button type="button" id="self-edit">修改</button></div><p class="self-meta"><span>${esc(selfActor(current.actor))} · ${mindTime(current.at)}</span>${current.reason ? `<span class="self-reason" title="${esc(current.reason)}">${esc(current.reason)}</span>` : ""}</p><div id="self-view" class="self-view">${esc(current.body)}</div><button type="button" id="self-more" class="self-more" hidden>显示全部</button><form id="self-form" hidden><label class="wide">当前自我<textarea id="self-body" name="body">${esc(current.body)}</textarea></label>${input("reason", "管理员修改理由", "", "required")}<div class="card-actions"><button class="primary">保存新版本</button><button type="button" id="self-cancel">取消</button></div><p class="hint">可增加“说话样本”：5–10 句这个角色真实会说的话，体现口头禅、标点习惯、笑的写法与常见长度；这属于 Self，可随成长修改。下一回合生效；运行中的回合保持原版本。版本冲突会拒绝覆盖。</p></form></section>
+  ${initiativeActivityMarkup(data.initiativeActivity, "self")}
   ${mindFold("self-candidates", "候选与回顾", candidates ? `<div class="mind-details">${candidates}</div>` : '<p class="hint">没有候选。普通聊天提出候选，空闲时间统一回顾。</p>', { summary: open ? `<span class="mind-attn">${open} 个候选待回顾</span>${data.candidates.length > open ? ` · 共 ${data.candidates.length} 个` : ""}` : data.candidates.length ? `没有待回顾的 · 共 ${data.candidates.length} 个` : "没有候选" })}
   ${mindFold("self-history", "版本历史与差异", `<div class="mind-details">${histories}</div>`, { summary: esc(`共 ${data.history.length} 个版本 · 当前 v${current.version} · ${mindClock(current.at)} ${selfActor(current.actor)}`) })}
   ${mindFold("self-anchors", "身份锚点", `<p>${esc(a.name)} · ${esc(a.id)}</p><p>${esc(appearance)}</p><p class="hint">名字、外形、账号与管理权限来自配置；性格与相处方式通过上方 self 发展。</p>`, { open: !!anchors.requiresMigration, summary: anchors.requiresMigration ? '<span class="mind-attn">需要确认原有外形</span>' : esc(`${a.name} · ${anchors.appearance ? "已设定外形" : "未设置固定外形"}`) })}
@@ -209,7 +277,7 @@ function selfMarkup(a, data) {
 // stand, then the settings. Both of the latter fold, their state on the
 // title line.
 function subjectMarkup(a, data) {
-  return `${subjectLogMarkup(data.subject)}${subjectStatusMarkup(data.subject)}${subjectFormMarkup(a)}`;
+  return `${subjectLogMarkup(data.subject)}${initiativeActivityMarkup(data.initiativeActivity, "subject")}${subjectStatusMarkup(data.subject)}${subjectFormMarkup(a)}`;
 }
 function subjectStatusMarkup(subject) {
   const checkStatus = subject.checkStatus,
@@ -281,13 +349,13 @@ function intentsMarkup(data) {
         `<article class="mind-row"><div class="mind-row-head"><strong class="mind-title" title="${esc(i.topic)}">${esc(i.topic)}</strong>${mindState(i.status)}</div>${mindClip(`${conversationLabel(i.target)} · ${i.reason}`, 2, `${intentTarget(i.target, cards)} · ${esc(i.reason)}`)}<p class="mind-meta">有效期至 ${mindClock(i.expiresAt)}${i.sentAt ? ` · 已确认发送 ${mindClock(i.sentAt)}` : ""}</p><details class="mind-more"><summary>来源与经过 · ${i.history.length} 步</summary><p class="mono">来源：${esc(i.evidence.join(", ") || "无")}</p>${i.history.map((h) => `<p>${mindTime(h.at)} · ${esc(mindStates[h.status] || h.status)}${h.reason ? ` · ${esc(h.reason)}` : ""}</p>`).join("")}</details>${!INTENT_DONE.includes(i.status) ? `<div class="mind-actions"><button type="button" class="ghost" data-cancel-intent="${esc(i.id)}" data-revision="${i.revision}">取消意图</button></div>` : ""}</article>`,
     )
     .join("");
-  return mindPage(
+  return `${initiativeActivityMarkup(data.initiativeActivity, "intents")}${mindPage(
     "聊天意图与结果",
     data.intents.length ? `进行中 ${live} · 共 ${data.intents.length}` : "",
     rows,
     "没有意图。已考虑、已交接和已确认投递分别记录。",
     "空闲时间想主动找人时会留下意图，由目标聊天决定发送、暂缓或放弃。",
-  );
+  )}`;
 }
 const sessionStates = {
   active: "进行中",

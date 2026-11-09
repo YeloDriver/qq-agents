@@ -12,6 +12,54 @@ const IMPRESSION_CHARS = 80;
 const NOTE_CHARS = 120;
 const OPEN_NOTES = 8;
 const OWED = 8;
+const PREFERENCES = 3;
+
+// Keep a durable reading reference without copying its text into free time.
+// Availability is not outbound authority; delivery still checks the source.
+export function subjectSourceReference(runtime, ctx, id) {
+  const m = runtime.memory.bind(ctx.agentId);
+  const source = m.db
+    .prepare(
+      "SELECT id,conversation,kind,payload FROM events WHERE agent_id=? AND id=?",
+    )
+    .get(ctx.agentId, id);
+  if (!source) throw Error("RECORD_NOT_FOUND");
+  const payload = JSON.parse(source.payload);
+  const app = payload.app;
+  if (
+    !(source.kind === "app.observation" && app) &&
+    !(source.kind === "external.read" && payload.tool === "web_fetch")
+  )
+    throw Error("SUBJECT_SOURCE_INVALID");
+  const record = { ...source, payload };
+  recallBoundary(runtime, ctx, {
+    publicOnly: ctx.freshSubject === true,
+  }).assert(record);
+  const originalScope = app?.source?.conversation || source.conversation;
+  const fetchedAt = app && Date.parse(app.fetchedAt);
+  const expired =
+    app &&
+    Number.isFinite(fetchedAt) &&
+    fetchedAt + runtime.agent(ctx.agentId).apps.shareTtlMs <= runtime.now();
+  return {
+    record,
+    reference: {
+      sourceRecordId: source.id,
+      sourceKind: app ? "app" : "web",
+      sourceStatus:
+        app?.ok === false ? "failed" : expired ? "expired" : "available",
+      readingScope: app
+        ? app.readingScope || "app-record"
+        : payload.truncated
+          ? "truncated-web-result"
+          : "stored-web-result",
+      ...(originalScope.startsWith("private:") &&
+      originalScope !== ctx.conversation
+        ? { fromPrivate: true }
+        : {}),
+    },
+  };
+}
 
 const clip = (text, max) => {
   const chars = Array.from(text);
@@ -96,6 +144,32 @@ export function subjectMaterials(runtime, ctx) {
   const boundary = recallBoundary(runtime, ctx, {
     publicOnly: ctx.freshSubject === true,
   });
+  const readingSources = [];
+  const foundBrief = (found) => {
+    if (!found.sourceRecordId) return { title: found.title };
+    try {
+      const source = subjectSourceReference(runtime, ctx, found.sourceRecordId);
+      readingSources.push(source.record);
+      return { title: found.title, ...source.reference };
+    } catch (error) {
+      if (
+        ![
+          "RECORD_NOT_FOUND",
+          "SUBJECT_SOURCE_INVALID",
+          "RECALL_SOURCE_NOT_ALLOWED",
+        ].includes(error.message)
+      )
+        throw error;
+      // A legacy log may reference a removed or now protected record.
+      // Withhold its title too when provenance cannot be safely returned.
+      return {
+        sourceStatus:
+          error.message === "RECALL_SOURCE_NOT_ALLOWED"
+            ? "restricted"
+            : "unavailable",
+      };
+    }
+  };
   const logs = boundary.rows(
     m.db
       .prepare(
@@ -109,7 +183,7 @@ export function subjectMaterials(runtime, ctx) {
           at: row.at,
           did: p.did,
           summary: p.summary,
-          found: (p.found || []).map((f) => f.title),
+          found: (p.found || []).map(foundBrief),
           next: p.next || "",
           ...(p.restReason ? { restReason: p.restReason } : {}),
           protectedPeerQzoneTargets: p.protectedPeerQzoneTargets,
@@ -179,18 +253,57 @@ export function subjectMaterials(runtime, ctx) {
       (subject.lastContactAt || 0) + a.subject.contactCooldownMs,
     ),
     // Listed in configuration order: whom to think of is the agent's choice.
-    targets: runtime.subject.reachableTargets(a).map((x) => ({
-      ...x,
-      ...cardBrief(
-        m,
-        x.target,
-        now,
-        runtime.connection(a.connectionId).accountId,
-      ),
-      lastHeardAt: lastAt.get(a.id, x.target, "message.received")?.at || null,
-      lastSaidAt: lastAt.get(a.id, x.target, "message.sent")?.at || null,
-      cooldownUntil: iso(m.state(x.target).proactiveCooldownUntil || 0),
-    })),
+    targets: runtime.subject.reachableTargets(a).map((x) => {
+      const personId = /^private:(\d+)$/.exec(x.target)?.[1];
+      const preferences = personId
+        ? boundary
+            .rows(m.identity.personItems(personId))
+            .filter(
+              (item) => item.kind === "boundary" && item.status === "open",
+            )
+        : [];
+      const shownPreferences = preferences.slice(0, PREFERENCES);
+      trackMindRecords(runtime, ctx, shownPreferences, "contact-preference");
+      return {
+        ...x,
+        ...cardBrief(
+          m,
+          x.target,
+          now,
+          runtime.connection(a.connectionId).accountId,
+        ),
+        lastHeardAt: lastAt.get(a.id, x.target, "message.received")?.at || null,
+        lastSaidAt: lastAt.get(a.id, x.target, "message.sent")?.at || null,
+        cooldownUntil: iso(m.state(x.target).proactiveCooldownUntil || 0),
+        ...(shownPreferences.length
+          ? {
+              preferences: shownPreferences.map((item) => ({
+                id: item.id,
+                revision: item.revision,
+                body: item.body,
+                evidence: item.evidence,
+                ...m.corrections.annotation("item", item.id, item.revision),
+                ...([item.createdIn, item.writtenIn].some(
+                  (scope) =>
+                    typeof scope === "string" && scope.startsWith("private:"),
+                )
+                  ? { fromPrivate: true }
+                  : {}),
+              })),
+            }
+          : {}),
+        ...(preferences.length > PREFERENCES
+          ? {
+              morePreferences: preferences.length - PREFERENCES,
+              preferencesRead: {
+                tool: "person_items",
+                personIds: [personId],
+                kind: "boundary",
+              },
+            }
+          : {}),
+      };
+    }),
   };
   const reads = (m.state(APP_LEDGER).calls || []).filter(
     (t) => t > now - DAY,
@@ -210,6 +323,7 @@ export function subjectMaterials(runtime, ctx) {
   trackMindRecords(runtime, ctx, logs, "subject-log");
   trackMindRecords(runtime, ctx, shares, "intent");
   trackMindRecords(runtime, ctx, notes);
+  trackMindRecords(runtime, ctx, readingSources, "reading-source");
   for (const d of diaries) ctx.privateRead.add(d.id);
   for (const repo of logs.flatMap((l) => l.protectedRepositories || []))
     ctx.privateRead.add(githubMarker(repo));
@@ -298,6 +412,7 @@ export function subjectMaterials(runtime, ctx) {
         a.network?.autonomous && !restricted
           ? a.subject.externalReads.map((x) => `${x.serverId}/${x.tool}`)
           : [],
+      webRead: runtime.toolsFor(a, SUBJECT).includes("web_fetch"),
       toolCallsThisTurn: a.subject.maxToolCallsPerTurn,
     },
     ...(allNotes.length ? { openNotes } : {}),

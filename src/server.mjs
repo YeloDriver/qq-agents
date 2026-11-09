@@ -108,6 +108,229 @@ function subjectActivity(m, agentId, now) {
     },
   };
 }
+
+const intentSendTools = new Set([
+  "qq_send",
+  "qq_send_burst",
+  "qq_send_voice",
+  "qq_send_file",
+  "qq_send_poke",
+  "app_share_send",
+]);
+function intentIdsForTurn(turn) {
+  const ids = new Set(),
+    add = (value) => {
+      if (typeof value === "string" && value.length > 0 && value.length <= 200)
+        ids.add(value);
+    },
+    active = turn.activeIntent;
+  if (typeof active === "string") add(active);
+  else if (active && typeof active === "object")
+    add(active.intentId || active.id);
+  add(turn.activeIntentId);
+  for (const id of turn.intentIds || []) add(id);
+  const visitReason = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visitReason(item);
+    } else if (value && typeof value === "object") {
+      add(value.intentId);
+      for (const [key, item] of Object.entries(value))
+        if (key !== "intentId") visitReason(item);
+    } else if (typeof value === "string") {
+      const match = value.match(/\bintentId\s*[:=]\s*([A-Za-z0-9_-]{1,200})/);
+      if (match) add(match[1]);
+    }
+  };
+  visitReason(turn.reason);
+  return [...ids];
+}
+function initiativeActivity(m, agentId, now) {
+  const weekStart = now - 7 * 86400000,
+    periods = [
+      { key: "day", start: now - 86400000 },
+      { key: "week", start: weekStart },
+    ],
+    empty = () => ({
+      self: { proposed: 0, due: 0, reviewed: 0 },
+      reading: { successful: 0 },
+      sharing: {
+        proposed: 0,
+        confirmed: 0,
+        rejected: 0,
+        pending: 0,
+        unknown: 0,
+      },
+      intents: {
+        created: 0,
+        waiting: 0,
+        deferred: 0,
+        cancelled: 0,
+        confirmedSent: 0,
+        sendRejected: 0,
+        deliveryFailed: 0,
+        pending: 0,
+        unknown: 0,
+      },
+    }),
+    result = { day: empty(), week: empty() },
+    inPeriod = (value, period) => {
+      const at = typeof value === "number" ? value : Date.parse(value);
+      return Number.isFinite(at) && at > period.start && at <= now;
+    };
+
+  // Keep JSON-backed history reads bounded to one agent and the widest window;
+  // recent transitions on older records still qualify through their own times.
+  const turns = m.db
+      .prepare(
+        "SELECT value FROM model_turns WHERE agent_id=? AND CAST(json_extract(value,'$.startedAt') AS INTEGER) BETWEEN ? AND ?",
+      )
+      .all(agentId, weekStart, now)
+      .map((row) => JSON.parse(row.value)),
+    candidates = m.db
+      .prepare(
+        `SELECT value FROM self_candidates WHERE agent_id=? AND (
+          CAST(json_extract(value,'$.createdAt') AS INTEGER) BETWEEN ? AND ?
+          OR CAST(json_extract(value,'$.reviewAfter') AS INTEGER) BETWEEN ? AND ?
+          OR EXISTS (SELECT 1 FROM json_each(self_candidates.value,'$.reviews') review_row
+            WHERE CAST(json_extract(review_row.value,'$.at') AS INTEGER) BETWEEN ? AND ?)
+        )`,
+      )
+      .all(agentId, weekStart, now, weekStart, now, weekStart, now)
+      .map((row) => JSON.parse(row.value)),
+    intentions = m.db
+      .prepare(
+        `SELECT value FROM intentions WHERE agent_id=? AND (
+          CAST(json_extract(value,'$.createdAt') AS INTEGER) BETWEEN ? AND ?
+          OR EXISTS (SELECT 1 FROM json_each(intentions.value,'$.history') history_row
+            WHERE CAST(json_extract(history_row.value,'$.at') AS INTEGER) BETWEEN ? AND ?)
+        )`,
+      )
+      .all(agentId, weekStart, now, weekStart, now)
+      .map((row) => JSON.parse(row.value)),
+    turnIntentIds = [...new Set(turns.flatMap(intentIdsForTurn))],
+    knownTurnIntentIds = new Set(
+      turnIntentIds.length
+        ? m.db
+            .prepare(
+              `SELECT id FROM intentions WHERE agent_id=? AND id IN (${turnIntentIds.map(() => "?").join(",")})`,
+            )
+            .all(agentId, ...turnIntentIds)
+            .map((row) => row.id)
+        : [],
+    ),
+    deliveryRows = m.db
+      .prepare(
+        `SELECT d.request_id AS requestId,d.status,d.created_at AS createdAt,
+          d.updated_at AS updatedAt,
+          CASE WHEN json_type(e.payload,'$.appShare')='object' THEN 1 ELSE 0 END AS appShare
+        FROM deliveries d LEFT JOIN events e
+          ON e.agent_id=d.agent_id AND e.dedupe='send:'||d.request_id||':pending'
+        WHERE d.agent_id=? AND (d.created_at>=? OR d.updated_at>=?)`,
+      )
+      .all(
+        agentId,
+        new Date(weekStart).toISOString(),
+        new Date(weekStart).toISOString(),
+      );
+
+  for (const period of periods) {
+    const stats = result[period.key];
+    for (const turn of turns)
+      if (inPeriod(turn.startedAt, period)) {
+        for (const call of Array.isArray(turn.toolCalls) ? turn.toolCalls : [])
+          if (
+            call.ok === true &&
+            ["web_fetch", "app_browse", "app_read"].includes(call.name)
+          )
+            stats.reading.successful++;
+        const intentIds = intentIdsForTurn(turn).filter((id) =>
+          knownTurnIntentIds.has(id),
+        );
+        if (intentIds.length) {
+          const startedAt =
+              typeof turn.startedAt === "number"
+                ? turn.startedAt
+                : Date.parse(turn.startedAt),
+            endedAt = Number.isFinite(
+              typeof turn.endedAt === "number"
+                ? turn.endedAt
+                : Date.parse(turn.endedAt),
+            )
+              ? typeof turn.endedAt === "number"
+                ? turn.endedAt
+                : Date.parse(turn.endedAt)
+              : now,
+            hasOutboxAttempt = intentIds.some((id) =>
+              deliveryRows.some((delivery) => {
+                const createdAt = Date.parse(delivery.createdAt);
+                return (
+                  delivery.requestId === `intent:${id}` &&
+                  Number.isFinite(createdAt) &&
+                  createdAt >= startedAt &&
+                  createdAt <= endedAt
+                );
+              }),
+            );
+          for (const call of Array.isArray(turn.toolCalls)
+            ? turn.toolCalls
+            : [])
+            if (
+              call.ok === false &&
+              intentSendTools.has(call.name) &&
+              (call.code === "INTENT_READ_CHECKPOINT_NOT_ALLOWED" ||
+                !hasOutboxAttempt)
+            )
+              stats.intents.sendRejected++;
+        }
+      }
+
+    for (const candidate of candidates) {
+      if (inPeriod(candidate.createdAt, period)) stats.self.proposed++;
+      if (
+        inPeriod(candidate.reviewAfter, period) &&
+        candidate.reviewAfter <= now
+      )
+        stats.self.due++;
+      for (const review of candidate.reviews || [])
+        if (inPeriod(review.at, period)) stats.self.reviewed++;
+    }
+
+    for (const intent of intentions) {
+      const created = inPeriod(intent.createdAt, period);
+      if (created) {
+        stats.intents.created++;
+        if (intent.appShare) stats.sharing.proposed++;
+      }
+      for (const transition of intent.history || [])
+        if (inPeriod(transition.at, period)) {
+          if (transition.status === "waiting") stats.intents.waiting++;
+          else if (transition.status === "deferred") stats.intents.deferred++;
+          else if (transition.status === "cancelled") stats.intents.cancelled++;
+        }
+    }
+
+    for (const delivery of deliveryRows) {
+      const at =
+        delivery.status === "pending" ? delivery.createdAt : delivery.updatedAt;
+      if (!inPeriod(at, period)) continue;
+      const isIntent = delivery.requestId.startsWith("intent:");
+      if (delivery.status === "sent") {
+        if (isIntent) stats.intents.confirmedSent++;
+        if (delivery.appShare) stats.sharing.confirmed++;
+      } else if (delivery.status === "failed") {
+        if (isIntent) stats.intents.deliveryFailed++;
+        if (delivery.appShare) stats.sharing.rejected++;
+      } else if (delivery.status === "pending") {
+        if (isIntent) stats.intents.pending++;
+        if (delivery.appShare) stats.sharing.pending++;
+      } else if (delivery.status === "unknown") {
+        if (isIntent) stats.intents.unknown++;
+        if (delivery.appShare) stats.sharing.unknown++;
+      }
+    }
+  }
+  return result;
+}
 const fileRecoveryRequest = z
   .object({
     agentId: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
@@ -736,7 +959,8 @@ export function createServer({
       }
       if (req.method === "GET" && url.pathname === "/api/mind") {
         const a = runtime.agent(url.searchParams.get("agentId")),
-          m = runtime.memory.bind(a.id);
+          m = runtime.memory.bind(a.id),
+          now = runtime.now();
         // A mood is about the people whose messages it cites; the card and the
         // timeline show each other by reference, nothing is copied.
         const moods = m.identity.moodHistory(500),
@@ -765,9 +989,8 @@ export function createServer({
         const shownMoods = moods.slice(0, 50),
           diariesIn = m.diariesInMoods(shownMoods.map((x) => x.id));
         return send({
-          current: m.identity.withEvidence(
-            m.identity.initialize(a, runtime.now()),
-          ),
+          current: m.identity.withEvidence(m.identity.initialize(a, now)),
+          initiativeActivity: initiativeActivity(m, a.id, now),
           anchors: m.identity.anchors(a),
           history: m.identity.history().map((v) => m.identity.withEvidence(v)),
           candidates: m.identity
