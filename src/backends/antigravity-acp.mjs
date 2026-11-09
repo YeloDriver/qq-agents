@@ -45,6 +45,11 @@ export async function runAcp(
     buffer = "",
     bytes = 0,
     closed = false;
+  let activeSessionId = "",
+    promptRequestId = 0,
+    acceptingUsage = false;
+  /** @type {{used: number, size: number} | undefined} */
+  let contextUsage;
   let stopping = false;
   const stop = () => {
     if (stopping) return;
@@ -78,6 +83,7 @@ export async function runAcp(
   const pending = new Map();
   const fail = () => {
     closed = true;
+    acceptingUsage = false;
     for (const item of pending.values())
       item.reject(Error("ANTIGRAVITY_PROTOCOL_ERROR"));
     pending.clear();
@@ -117,10 +123,27 @@ export async function runAcp(
                   }),
             }) + "\n",
           );
+        } else if (message.method === "session/update") {
+          const update = message.params?.update;
+          if (
+            acceptingUsage &&
+            message.params?.sessionId === activeSessionId &&
+            update?.sessionUpdate === "usage_update"
+          )
+            contextUsage =
+              Number.isSafeInteger(update.used) &&
+              update.used >= 0 &&
+              Number.isSafeInteger(update.size) &&
+              update.size > 0
+                ? { used: update.used, size: update.size }
+                : undefined;
         } else if (!message.method) {
           const item = pending.get(message.id);
           if (!item) throw Error();
           pending.delete(message.id);
+          // Close the usage window in the parser: later frames in this same
+          // stdout chunk must not replace the completed prompt's occupancy.
+          if (message.id === promptRequestId) acceptingUsage = false;
           if (message.error) item.reject(Error("ANTIGRAVITY_PROTOCOL_ERROR"));
           else if (message.result && typeof message.result === "object")
             item.resolve(message.result);
@@ -140,6 +163,11 @@ export async function runAcp(
       if (closed) return reject(Error("ANTIGRAVITY_PROTOCOL_ERROR"));
       const id = ++serial;
       pending.set(id, { resolve, reject });
+      if (method === "session/prompt") {
+        promptRequestId = id;
+        acceptingUsage = true;
+        contextUsage = undefined;
+      }
       child.stdin?.write(
         JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n",
       );
@@ -180,6 +208,7 @@ export async function runAcp(
     const id = options.session || session.sessionId;
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id || ""))
       throw Error("ANTIGRAVITY_PROTOCOL_ERROR");
+    activeSessionId = id;
     if (options.model)
       await request("session/set_model", {
         sessionId: id,
@@ -212,8 +241,8 @@ export async function runAcp(
     });
     if (closed || result.stopReason !== "end_turn")
       throw Error("ANTIGRAVITY_PROTOCOL_ERROR");
-    // ACP turn usage can sum several inferences, so never claim it is the latest
-    // context occupancy. The framework retains its conservative estimate.
+    // Only session usage_update describes current occupancy. Prompt-result
+    // usage sums inferences and must never substitute for missing telemetry.
     emit({
       event: "step_update",
       step_update: {
@@ -221,6 +250,7 @@ export async function runAcp(
         step_index: 0,
         state: "DONE",
         step_type: "agent_response",
+        ...(contextUsage ? { usage: contextUsage } : {}),
       },
     });
     emit({

@@ -152,6 +152,7 @@ export class TurnRunner {
         conversation,
         prompt: prepared.prompt,
         instructions: prepared.instructions,
+        contextCapacityTokens: a.contextPolicy.capacityTokens,
         onUsage: (usage) =>
           !runtime.stopped && runtime.contexts.usage(ctx, usage),
         signal: controller.signal,

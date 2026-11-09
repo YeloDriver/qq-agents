@@ -21,10 +21,20 @@ const options = {
   model: "synthetic",
   effort: "low",
 };
-function fake(overrides = {}) {
+function fake(
+  overrides = {},
+  { beforePrompt = [], duringPrompt = [], afterPrompt = [] } = {},
+) {
   const calls = [],
     replies = [];
   let killed = false;
+  const writeLines = (child, lines) => {
+    child.stdout.write(
+      lines
+        .map((line) => (typeof line === "string" ? line : JSON.stringify(line)))
+        .join("\n") + "\n",
+    );
+  };
   const launch = () => {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
@@ -64,34 +74,53 @@ function fake(overrides = {}) {
           : defaults[msg.method];
         queueMicrotask(() => {
           if (msg.method === "session/prompt") {
-            child.stdout.write(
-              JSON.stringify({
+            const reply =
+              typeof result === "string"
+                ? result
+                : JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: msg.id,
+                    ...(result.error ? result : { result }),
+                  });
+            writeLines(child, [
+              {
                 jsonrpc: "2.0",
                 id: "permission",
                 method: "session/request_permission",
                 params: {
                   options: [{ optionId: "allow", kind: "allow_once" }],
                 },
-              }) + "\n",
-            );
-            child.stdout.write(
-              JSON.stringify({
+              },
+              {
                 jsonrpc: "2.0",
                 id: "file",
                 method: "fs/read_text_file",
                 params: { path: "private" },
-              }) + "\n",
-            );
+              },
+              ...duringPrompt,
+              reply,
+              ...afterPrompt,
+            ]);
+          } else if (msg.method === "session/set_config_option") {
+            writeLines(child, [
+              ...beforePrompt,
+              {
+                jsonrpc: "2.0",
+                id: msg.id,
+                ...(result.error ? result : { result }),
+              },
+            ]);
+          } else {
+            writeLines(child, [
+              typeof result === "string"
+                ? result
+                : JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: msg.id,
+                    ...(result.error ? result : { result }),
+                  }),
+            ]);
           }
-          child.stdout.write(
-            typeof result === "string"
-              ? result + "\n"
-              : JSON.stringify({
-                  jsonrpc: "2.0",
-                  id: msg.id,
-                  ...(result.error ? result : { result }),
-                }) + "\n",
-          );
         });
         callback();
       },
@@ -99,6 +128,16 @@ function fake(overrides = {}) {
     return child;
   };
   return { launch, calls, replies, killed: () => killed };
+}
+function usageUpdate(sessionId, used, size) {
+  return {
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId,
+      update: { sessionUpdate: "usage_update", used, size },
+    },
+  };
 }
 test("ACP preserves the terminal contract, refuses client capabilities, and avoids cumulative occupancy", async () => {
   const f = fake(),
@@ -113,6 +152,100 @@ test("ACP preserves the terminal contract, refuses client capabilities, and avoi
   assert.deepEqual(f.replies[0].result, { outcome: { outcome: "cancelled" } });
   assert.equal(f.replies[1].error.code, -32601);
   assert(f.killed());
+});
+test("ACP uses the last valid current-session usage update received during prompt", async () => {
+  const otherSession = "22222222-2222-4222-8222-222222222222",
+    f = fake(
+      {},
+      {
+        beforePrompt: [usageUpdate(id, 100, 1000)],
+        duringPrompt: [
+          usageUpdate(id, 200, 1000),
+          usageUpdate(otherSession, 900, 1000),
+          usageUpdate(id, 230, 1000),
+        ],
+        // Kept in the same stdout write after the prompt response to exercise
+        // notifications buffered behind the terminal response.
+        afterPrompt: [usageUpdate(id, 999, 1000)],
+      },
+    ),
+    events = [];
+  await runAcp(options, "synthetic prompt", (e) => events.push(e), f.launch);
+  assert.deepEqual(
+    events.find((e) => e.event === "step_update").step_update.usage,
+    { used: 230, size: 1000 },
+  );
+});
+test("ACP clears a valid usage update when the latest prompt update is null", async () => {
+  const f = fake(
+      {},
+      {
+        duringPrompt: [usageUpdate(id, 230, 1000), usageUpdate(id, null, 1000)],
+      },
+    ),
+    events = [];
+  await runAcp(options, "synthetic prompt", (e) => events.push(e), f.launch);
+  assert.equal(
+    events.find((e) => e.event === "step_update").step_update.usage,
+    undefined,
+  );
+});
+test("ACP accepts zero usage as a measured value", async () => {
+  const f = fake({}, { duringPrompt: [usageUpdate(id, 0, 1000)] }),
+    events = [];
+  await runAcp(options, "synthetic prompt", (e) => events.push(e), f.launch);
+  assert.deepEqual(
+    events.find((e) => e.event === "step_update").step_update.usage,
+    { used: 0, size: 1000 },
+  );
+});
+test("ACP keeps usage above the reported window so the capacity guard can see it", async () => {
+  const f = fake({}, { duringPrompt: [usageUpdate(id, 1200, 1000)] }),
+    events = [];
+  await runAcp(options, "synthetic prompt", (e) => events.push(e), f.launch);
+  assert.deepEqual(
+    events.find((e) => e.event === "step_update").step_update.usage,
+    { used: 1200, size: 1000 },
+  );
+});
+for (const [name, used, size] of [
+  ["negative used", -1, 1000],
+  ["negative size", 1, -1],
+  ["fractional used", 0.5, 1000],
+  ["fractional size", 1, 1000.5],
+  ["unsafe used", Number.MAX_SAFE_INTEGER + 1, 1000],
+  ["unsafe size", 1, Number.MAX_SAFE_INTEGER + 1],
+  ["string used", "10", 1000],
+  ["string size", 1, "1000"],
+  ["null used", null, 1000],
+  ["null size", 1, null],
+  ["zero size", 1, 0],
+])
+  test(`ACP ignores ${name} usage updates`, async () => {
+    const f = fake({}, { duringPrompt: [usageUpdate(id, used, size)] }),
+      events = [];
+    await runAcp(options, "synthetic prompt", (e) => events.push(e), f.launch);
+    assert.equal(
+      events.find((e) => e.event === "step_update").step_update.usage,
+      undefined,
+    );
+  });
+test("ACP leaves usage absent when every update is from another session or outside prompt", async () => {
+  const otherSession = "33333333-3333-4333-8333-333333333333",
+    f = fake(
+      {},
+      {
+        beforePrompt: [usageUpdate(id, 100, 1000)],
+        duringPrompt: [usageUpdate(otherSession, 200, 1000)],
+        afterPrompt: [usageUpdate(id, 300, 1000)],
+      },
+    ),
+    events = [];
+  await runAcp(options, "synthetic prompt", (e) => events.push(e), f.launch);
+  assert.equal(
+    events.find((e) => e.event === "step_update").step_update.usage,
+    undefined,
+  );
 });
 function processAlive(pid) {
   try {

@@ -22,7 +22,7 @@ import { isDeepStrictEqual } from "node:util";
  * @typedef {{source: string, contextTokens: number, capacityTokens?: number,
  *   cumulativeTokens?: number, basis: string}} UsageReport
  * @typedef {{eventId: string, index: number, label: string, mediaId?: string, data?: string, mimeType?: string}} InputImage
- * @typedef {{inputImages?: InputImage[], conversation?: string, game?: boolean, protectedWork?: boolean, social?: boolean, prompt: string, instructions?: string,
+ * @typedef {{inputImages?: InputImage[], contextCapacityTokens?: number, conversation?: string, game?: boolean, protectedWork?: boolean, social?: boolean, prompt: string, instructions?: string,
  *   onUsage?: (usage: UsageReport) => void, signal: AbortSignal, tools: ToolSpec[],
  *   callTool: (name: string, args: any) => Promise<unknown>, session?: StoredSession | null,
  *   saveSession: (session: StoredSession | null) => void,

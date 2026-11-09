@@ -80,7 +80,7 @@ Windows 的 ACP 通道与 headless 共用支持批处理入口和参数转义的
 
 ACP 路径为：QQ 图片 → `qq_image_read` → 框架权限与媒体检查 → MCP 图片内容块 → 模型。工具生成的房间截图沿用同一路径，不再落盘成临时图片后要求模型调用原生读文件工具。GIF 转换、帧顺序与采样说明、单图/单次/单回合容量限制仍生效。ACP 不开放原生文件读取；工具继续经本回合凭据、白名单与 hook 校验，客户端文件、终端和额外权限请求拒绝。
 
-当前 ACP 每回合启动进程并显式续接原生会话，`cliReuse` 仅影响 headless。切换通道会按既有交接机制重建 Antigravity 模型会话一次，长期记忆、Self 和发送账本保留。ACP 回合用量可能累计多次推理，当前不把它当作最后一次上下文占用，沿用框架保守估算和容量保护。此优化减少一次原生读图调用，不承诺固定延迟。
+当前 ACP 每回合启动进程并显式续接原生会话，`cliReuse` 仅影响 headless。切换通道会按既有交接机制重建 Antigravity 模型会话一次，长期记忆、Self 和发送账本保留。适配器只接收当前会话在本轮 `session/prompt` 请求期间发出的 `session/update` `usage_update`，取最后一条有效的 `used` 作为上下文占用；`session/prompt` 返回的累计 `usage` 不作为占用。有效通知中的 `size` 只可将本角色配置的 `contextPolicy.capacityTokens` 下调，不会扩大管理员预算。没有有效通知时继续沿用框架保守估算和容量保护；具体 CLI 版本是否及时提供通知，须隔离验收确认。此优化减少一次原生读图调用，不承诺固定延迟。
 
 ```sh
 node scripts/antigravity-acp-acceptance.mjs --allow-real-models --command agy --model <model-id>
@@ -114,9 +114,9 @@ Antigravity 官方说明 CLI 会自动将旧上下文压缩成 checkpoint。框�
 
 若希望保留更长的原生会话，在确认所选模型窗口后设置角色 `contextPolicy.capacityTokens`。例如 `65536` 是管理员选择的框架预算，不是自动识别的模型上限；预留量和 `hardRatio` 仍生效。不要仅因模型宣称长窗口而取消容量保护。默认容量保持 `32768`，已有显式配置不变。
 
-上下文占用取成功回合中最后一个已完成 `agent_response` 的 `input_tokens + cache_read_tokens + output_tokens`，包含缓存输入，不累加各轮请求，不重复加入已包含在输出中的 thinking tokens。忽略 checkpoint 等辅助步骤、其他会话、乱序旧步骤和结束后的迟到回调；最终 `result.usage` 是累计用量，不作为占用。最后一次模型响应没有有效用量时，保留框架原有保守估算，不能把缺失数据当作零。
+Headless 上下文占用取成功回合中最后一个已完成 `agent_response` 的 `input_tokens + cache_read_tokens + output_tokens`，包含缓存输入，不累加各轮请求，不重复加入已包含在输出中的 thinking tokens。ACP 则取当前会话、本轮 `session/prompt` 期间最后一条有效 `usage_update.used`；对应的 `size` 是窗口信息，不会覆盖管理员配置。两种通道都忽略其他会话和终态后的迟到数据；ACP 的 `session/prompt` 返回值中的 `usage` 可能累计多次推理，不作为占用。没有有效测量时保留框架原有保守估算，不能把缺失数据当作零。
 
-CLI 未提供模型窗口容量时仍使用角色 `contextPolicy.capacityTokens`（缺省 32768），不宣称这是模型真实上限，也不自动扩大管理员配置；预留量、硬阈值、取消及压力退休继续生效。正常的小上下文不再因工具目录的字符数被当成 token 数而每轮退休。需要更长会话时，应在核对所用模型窗口后设置该角色容量。
+有效 ACP `usage_update.size` 与角色 `contextPolicy.capacityTokens` 共同限制本角色的运行预算，按两者较小值生效；没有有效窗口数据时仍使用角色配置（缺省 32768），不宣称这是模型真实上限，也不自动扩大管理员配置。预留量、硬阈值、取消及压力退休继续生效。有效 ACP 占用数据可避免将本轮字符估算当作当前上下文占用；通知缺失或无效时仍使用原有保守估算，可能触发容量保护。需要更长会话时，应在核对所用模型窗口后设置该角色容量。
 
 隔离 profile 使用 CLI 1.4.11 实测可用的 `--gemini_dir`、`--app_data_dir` 参数，它们不是公开稳定 API。升级 CLI 前需重跑隔离验收；若参数、事件结构或 hook 行为变化，应停止使用该版本并更新适配器。框架不捆绑 Antigravity 二进制，不自动下载或升级它；Docker 也需自行准备可用的 CLI 与登录。连接检测读取模型目录，并非付费模型请求成功的证明。桥接关闭额外 G1 credits，模型仍会消耗账号已有额度。
 

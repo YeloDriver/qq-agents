@@ -1050,6 +1050,7 @@ export class AntigravityBackend {
       let lastResponseStep = -1;
       let responseSeen = false;
       /** @type {number | null} */ let contextTokens = null;
+      /** @type {number | null} */ let contextCapacity = null;
       /** @type {Error | undefined} */ let protocolError;
       const fail = () => {
         diagnosticEvent({
@@ -1115,9 +1116,27 @@ export class AntigravityBackend {
                 if (step.step_index > lastResponseStep) {
                   lastResponseStep = step.step_index;
                   contextTokens = null;
+                  contextCapacity = null;
                 }
                 if (step.state === "DONE") {
-                  contextTokens = responseOccupancy(step.usage);
+                  if (this.config.cliProtocol === "acp") {
+                    const usage = step.usage;
+                    const valid =
+                      Number.isSafeInteger(usage?.used) &&
+                      usage.used >= 0 &&
+                      Number.isSafeInteger(usage?.size) &&
+                      usage.size > 0;
+                    contextTokens = valid ? usage.used : null;
+                    // The CLI's window may narrow, but never expand, the
+                    // administrator's configured pressure budget.
+                    contextCapacity =
+                      valid &&
+                      typeof params.contextCapacityTokens === "number" &&
+                      Number.isSafeInteger(params.contextCapacityTokens) &&
+                      params.contextCapacityTokens > 0
+                        ? Math.min(usage.size, params.contextCapacityTokens)
+                        : null;
+                  } else contextTokens = responseOccupancy(step.usage);
                   if (!responseSeen) {
                     responseSeen = true;
                     timing("firstResponse");
@@ -1251,8 +1270,13 @@ export class AntigravityBackend {
         params.onUsage?.({
           source: "measured",
           contextTokens,
+          ...(contextCapacity !== null
+            ? { capacityTokens: contextCapacity }
+            : {}),
           basis:
-            "Antigravity latest completed agent_response input_tokens + cache_read_tokens + output_tokens; excludes cumulative result and auxiliary steps",
+            this.config.cliProtocol === "acp"
+              ? "ACP current-session usage_update.used; window capped by configured role budget; excludes cumulative prompt usage"
+              : "Antigravity latest completed agent_response input_tokens + cache_read_tokens + output_tokens; excludes cumulative result and auxiliary steps",
         });
       modelSucceeded = true;
       diagnosticEvent({

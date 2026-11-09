@@ -658,6 +658,98 @@ test("the runtime keeps a default-capacity Antigravity session with the complete
   assert.equal(mem.state(scope).lifecycle.reason, "capacity-guard");
 });
 
+function acpCapacityFixture(t, usage) {
+  const { backend } = setup(t, "success", temp(t), { fakeChild: true });
+  backend.config.cliProtocol = "acp";
+  const launch = backend.spawn.bind(backend);
+  backend.spawn = (...args) => {
+    const child = launch(...args);
+    child.inputReady.then(() => {
+      const id = "00000000-0000-4000-8000-000000000301";
+      const native = path.join(backend.profile, "cli", "conversations");
+      fs.mkdirSync(native, { recursive: true });
+      fs.writeFileSync(path.join(native, id + ".db"), "synthetic");
+      const frames = successfulFrames(id);
+      frames[1].step_update.usage = usage;
+      child.emitFrames(...frames);
+      child.closeWith(0);
+    });
+    return child;
+  };
+  const cfg = config(1);
+  cfg.agents[0].tools = toolSpecs().map((s) => s.name);
+  const f = runtimeFixture(t, { cfg });
+  f.runtime.backends.set("agent-0", backend);
+  return { ...f, backend };
+}
+
+test("ACP measured occupancy keeps a full-catalogue session within the configured budget", async (t) => {
+  const f = acpCapacityFixture(t, { used: 20000, size: 1000000 });
+  const mem = f.store.bind("agent-0"),
+    scope = "private:30000";
+  await f.runtime.wake("agent-0", scope);
+  const first = mem.state(scope);
+  assert(first.session);
+  assert.equal(first.usage.source, "measured");
+  assert.equal(first.usage.contextTokens, 20000);
+  assert.equal(first.usage.capacityTokens, 32768);
+  assert(
+    mem.identity.get("model_turns", first.lastTurnId).estimatedTextChars >
+      32768,
+  );
+  await f.runtime.wake("agent-0", scope);
+  assert.equal(mem.state(scope).session.id, first.session.id);
+  assert.equal(
+    mem.identity.get("model_turns", mem.state(scope).lastTurnId).initialSession,
+    false,
+  );
+  f.runtime.config.agents[0].contextPolicy.capacityTokens = 24000;
+  await f.runtime.wake("agent-0", scope);
+  assert.equal(mem.state(scope).session, null);
+  assert.equal(mem.state(scope).lifecycle.reason, "capacity-guard");
+});
+
+test("ACP respects a smaller CLI window instead of the larger configured fallback", async (t) => {
+  const f = acpCapacityFixture(t, { used: 10000, size: 12000 });
+  await f.runtime.wake("agent-0", "private:30000");
+  const mem = f.store.bind("agent-0"),
+    state = mem.state("private:30000");
+  assert.equal(state.session, null);
+  assert.equal(state.lifecycle.reason, "capacity-guard");
+  assert.equal(
+    mem.identity.get("model_turns", state.lastTurnId).usage.capacityTokens,
+    12000,
+  );
+});
+
+test("ACP preserves an explicitly reported zero occupancy instead of manufacturing a character estimate", async (t) => {
+  const f = acpCapacityFixture(t, { used: 0, size: 1000000 });
+  await f.runtime.wake("agent-0", "private:30000");
+  const state = f.store.bind("agent-0").state("private:30000");
+  assert(state.session);
+  assert.equal(state.usage.source, "measured");
+  assert.equal(state.usage.contextTokens, 0);
+  assert.equal(state.usage.capacityTokens, 32768);
+});
+
+for (const usage of [
+  undefined,
+  { used: -1, size: 1000000 },
+  { used: 20000, size: -1 },
+])
+  test(`ACP missing or invalid current occupancy keeps conservative pressure protection: ${JSON.stringify(usage)}`, async (t) => {
+    const f = acpCapacityFixture(t, usage);
+    await f.runtime.wake("agent-0", "private:30000");
+    const mem = f.store.bind("agent-0"),
+      state = mem.state("private:30000");
+    assert.equal(state.session, null);
+    assert.equal(state.lifecycle.reason, "capacity-guard");
+    assert.equal(
+      mem.identity.get("model_turns", state.lastTurnId).usage.source,
+      "estimated",
+    );
+  });
+
 test("Antigravity rejects polluted profiles before spawning", async (t) => {
   const { backend, params, launches } = setup(t);
   fs.mkdirSync(path.join(backend.profile, "config"), { recursive: true });
