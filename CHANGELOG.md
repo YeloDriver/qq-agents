@@ -6,6 +6,12 @@
 
 ## 未发布
 
+### 修复 Antigravity ACP 原生 MCP 工具调用失败
+
+- ACP 原生 MCP 为工具调用附加或要求 `toolSummary`，而 `qq_draft` 的严格 action 分支 schema 会拒绝该字段；移除字段又会被 CLI 拒绝，导致工具调用失败并延迟角色回复。
+- 专用 MCP 适配器只在发布工具 schema 时为顶层对象及根 `oneOf`、`anyOf`、`allOf` 中的对象分支接纳 `toolSummary`，并在调用前移除。业务参数仍严格验证，权限检查和发送前草稿审阅不变。
+- 兼容性限于 Antigravity ACP 适配边界；不改全局工具定义、配置默认值或数据库，也不自动发送历史草稿。
+
 ### 同步上游 0.5.8 并保留本地运行适配
 
 - 合并上游主线至 [22b99e2](https://github.com/wangyufengsky/qq-agents/commit/22b99e21471e9524aa8bd45c06ae64f114788b57)，整合版本化输入、草稿准备与提交回执、主人格收件箱和后端恢复修复；保留本库 Windows ACP 启动、上下文预算与回退估算、主动分享和 Self 成长链路。

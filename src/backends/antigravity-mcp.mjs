@@ -37,12 +37,45 @@ const server = new Server(
   { name: "qq-agents", version: "1.0.0" },
   { capabilities: { tools: {} } },
 );
-server.setRequestHandler(ListToolsRequestSchema, () => request("/catalog"));
+/** Allow CLI metadata only on the call object, including strict union branches.
+ * Nested business objects must retain their original validation boundaries.
+ * @param {any} schema @returns {any} */
+function nativeInputSchema(schema) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema))
+    return schema;
+  const result = { ...schema };
+  if (schema.type === "object" || schema.properties)
+    result.properties = {
+      ...schema.properties,
+      toolSummary: {
+        type: "string",
+        description:
+          "CLI display summary only; never a bridge argument or authorization.",
+      },
+    };
+  for (const key of ["oneOf", "anyOf", "allOf"])
+    if (Array.isArray(schema[key]))
+      result[key] = schema[key].map(nativeInputSchema);
+  return result;
+}
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const catalogue = await request("/catalog");
+  return {
+    ...catalogue,
+    tools: catalogue.tools.map((/** @type {any} */ tool) => ({
+      ...tool,
+      inputSchema: nativeInputSchema(tool.inputSchema),
+    })),
+  };
+});
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
+    // ACP requires this display field, but strict logical schemas reject it.
+    // Strip only the native metadata; business validation remains in the bridge.
+    const { toolSummary: _summary, ...args } = req.params.arguments || {};
     return await request("/call", {
       name: req.params.name,
-      arguments: req.params.arguments || {},
+      arguments: args,
     });
   } catch {
     return {

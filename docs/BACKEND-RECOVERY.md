@@ -31,6 +31,10 @@
 
 Codex 仍使用各角色独立的 `CODEX_HOME` 和桥接拥有的 app-server 子进程，不操作日常 Codex 应用。旧子进程延迟到达的退出/错误/输出事件不会破坏替换后的连接。
 
+## Antigravity ACP 原生 MCP 兼容
+
+Antigravity ACP 原生 MCP 可能为工具调用附加或要求 `toolSummary`。专用适配器仅扩展工具 schema 的顶层对象及根部 `oneOf`、`anyOf`、`allOf` 的对象分支以接纳该元数据，并在调用前移除；嵌套业务参数及 `qq_draft` 各 action 的严格校验保持不变。权限检查、发送前草稿审阅也保持不变，历史草稿不会自动发送。
+
 ## 接口与验证
 
 `GET /api/status` 的 `backends` 提供状态快照。管理员使用 `POST /api/backend`，传 `id` 和 `action`（`check`、`recover`、`discover`、`settings`）；选择实例额外传 `candidateId`，开关传 `autoReconnect`。沿用管理员认证、Origin/Host 防护和 live 模式边界，模型工具目录不暴露这些运维接口。响应只显示归一化错误，不向管理台传递底层凭据诊断。
